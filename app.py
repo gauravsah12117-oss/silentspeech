@@ -26,9 +26,9 @@ from src.decision import decide
 from src.features import fill_missing, frame_motion, lip_motion, normalise, pad_to_length
 from src.landmarks import N_POINTS, LipTracker, draw_lips, mouth_aspect_ratio
 from src.llm_corrector import LLMCorrector
+from src.recognizer import load_recognizer
 from src.speaker import Speaker
-from src.utils import (FPSCounter, draw_text, load_env, load_phrases, open_camera,
-                       resolve_model, wrap_text)
+from src.utils import FPSCounter, draw_text, load_env, load_phrases, open_camera, wrap_text
 
 WINDOW = "SilentSpeech"
 W, H = 1280, 640
@@ -48,22 +48,22 @@ class App:
         self.mode = args.mode
         self.phrases = load_phrases(phrase_set="full")
 
-        self.runtime = None
-        model_path = resolve_model(args.speaker, args.model)
-        if model_path.exists():
-            from src.model import LipReaderRuntime
-            self.runtime = LipReaderRuntime(model_path)
-            print(f"Model: {model_path} ({len(self.runtime.label_map)} phrases)")
+        self.runtime, why = load_recognizer(args.speaker, self.phrases, getattr(args, "recognizer", "auto"),
+                                            args.model)
+        if self.runtime is not None:
+            print(f"Recogniser: {self.runtime.describe()} - {why}")
         else:
-            print(f"No model at {model_path}: tracking-only mode. Record data and run train.py first.")
+            print(f"Tracking-only mode: {why}")
 
         known = self.runtime.label_map if self.runtime else list(self.phrases)
         self.speaker = Speaker({pid: self.phrases[pid] for pid in known}, args.speaker, args.voice)
+        print(f"Voice: {self.speaker.label}")
         if args.voice == "cloned":
             missing = self.speaker.missing_audio()
             if missing:
-                print(f"No cloned audio for {len(missing)} phrase(s) in {self.speaker.audio_dir}; "
-                      "the offline voice will speak those.")
+                print(f"No own-voice clip for {len(missing)} phrase(s) in {self.speaker.audio_dir}; "
+                      "the offline computer voice speaks those (record_voice.py adds them).")
+        self.brightness = None
 
         self.llm = LLMCorrector()      # cheap: threads start only on the first call
         self.llm_on = config.USE_LLM and not args.no_llm and self.llm.available
@@ -288,6 +288,8 @@ class App:
         view = cv2.flip(view, 1)
         if pts is None:
             draw_text(view, "No face detected - face the camera, light from the front", (12, 30), 0.6, RED, 2)
+        if self.brightness is not None and self.brightness < 50:
+            draw_text(view, "Too dark: put a light in front of you", (12, 58), 0.6, AMBER, 2)
         if self.capturing:
             cv2.circle(view, (VW - 90, 28), 11, (0, 0, 255), -1, cv2.LINE_AA)
             draw_text(view, "REC", (VW - 72, 36), 0.7, (0, 0, 255), 2)
@@ -346,8 +348,9 @@ class App:
         cv2.rectangle(canvas, (0, H - 36), (W, H), (48, 44, 42), -1)
         llm = f"ON ({self.llm.provider})" if self.llm_on else "OFF"
         lat = self.speaker.last_latency_ms
+        rec = "-" if self.runtime is None else self.runtime.kind
         status = (f"Mode: {'PUSH-TO-TALK' if self.mode == 'ptt' else 'AUTO'}   FPS {self.fps.fps:4.1f}   "
-                  f"LLM: {llm}   Voice: {self.args.voice}   Speaker: {self.args.speaker}   "
+                  f"Recogniser: {rec}   LLM: {llm}   Speaker: {self.args.speaker}   "
                   f"Latency: {'-' if lat is None else f'{lat:.0f} ms'}   MAR {mar:.2f}  motion {motion:.3f}")
         draw_text(canvas, status, (16, H - 12), 0.5, GREY, 1)
         return canvas
@@ -374,6 +377,7 @@ class App:
                     if frame.shape[:2] != (VH, VW):
                         frame = cv2.resize(frame, (VW, VH))
                     self.fps.tick()
+                    self.brightness = float(frame[::8, ::8].mean())   # every 8th pixel: microseconds
                     now = time.perf_counter()
                     pts = tracker.process(frame)
                     mar, motion = self.step(pts, now)
@@ -398,6 +402,8 @@ def main(argv=None):
     ap.add_argument("--speaker", default=config.SPEAKER_ID)
     ap.add_argument("--camera", type=int, default=None)
     ap.add_argument("--model", help="use this model file instead of the speaker's or the base model")
+    ap.add_argument("--recognizer", choices=["auto", "neural", "templates"], default="auto",
+                    help="auto: enrolled/trained neural model if it knows this speaker, else calibration templates")
     App(ap.parse_args(argv)).run()
 
 

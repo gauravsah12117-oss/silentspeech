@@ -4,6 +4,7 @@
     python evaluate.py --split val                          # + threshold table to tune CONF_ACCEPT
     python evaluate.py --split unseen_speaker --speaker s04 # needs: python train.py --holdout-speaker s04
     python evaluate.py --split test --llm                   # LLM benefit on medium-confidence clips
+    python evaluate.py --split test --recognizer templates  # training-free baseline (DTW templates)
 
 Personalisation gain (before vs after enrolment), on a session not used for enrolment:
     python evaluate.py --split unseen_speaker --speaker new01 --session 2
@@ -21,10 +22,10 @@ from pathlib import Path
 import numpy as np
 
 import config
-from src.dataset import clip_key, load_positions, make_splits, read_metadata, scan_clips, stack_features
+from src.dataset import clip_key, load_positions, make_splits, read_metadata, scan_clips
 from src.decision import top_k
 from src.metrics import compute_metrics, threshold_table, top_confusions
-from src.model import LipReaderRuntime, predict_proba
+from src.model import LipReaderRuntime
 from src.utils import holdout_model_path, load_env, load_phrases
 
 
@@ -35,6 +36,10 @@ def parse_args(argv=None):
     ap.add_argument("--session", type=int, help="only clips from this session")
     ap.add_argument("--model", help="model file (default depends on --split)")
     ap.add_argument("--llm", action="store_true", help="measure LLM re-ranking on medium-confidence clips")
+    ap.add_argument("--recognizer", choices=["neural", "templates"], default="neural",
+                    help="templates: the training-free baseline built from the training clips")
+    ap.add_argument("--set", dest="phrase_set", default=config.PHRASE_SET, choices=["mvp", "full"],
+                    help="phrase set for --recognizer templates")
     return ap.parse_args(argv)
 
 
@@ -96,7 +101,38 @@ def main(argv=None):
     load_env()
     if args.split == "unseen_speaker" and not args.speaker:
         sys.exit("--split unseen_speaker needs --speaker, e.g. --speaker s04")
+    phrases = load_phrases(phrase_set="full")
+    if args.recognizer == "templates":
+        runtime, eval_clips, split_key = template_baseline(args, phrases)
+    else:
+        runtime, eval_clips, split_key = neural_setup(args)
+    evaluate(args, runtime, eval_clips, split_key, phrases)
 
+
+def template_baseline(args, phrases):
+    """Instant templates built from the training clips, scored on the same test clips."""
+    from src.templates import TemplateMatcher
+
+    phrase_ids = [pid for pid, p in phrases.items() if args.phrase_set == "full" or p.get("set", "mvp") == "mvp"]
+    clips = scan_clips(phrase_ids=set(phrase_ids))
+    if args.split == "unseen_speaker":
+        refs = [c for c in clips if c.speaker != args.speaker]
+        evals, key = [c for c in clips if c.speaker == args.speaker], f"unseen_{args.speaker}"
+    else:
+        sp = make_splits(clips)
+        split = "test" if args.split == "all" else args.split
+        refs = sp["train"] if split == "val" else sp["train"] + sp["val"]
+        evals, key = sp[split], split
+    if not refs:
+        sys.exit("No reference clips to build templates from.")
+    print(f"Building templates from {len(refs)} clips (this takes a while for big datasets)...")
+    m = TemplateMatcher.from_clips(refs, phrase_ids, max_queries=300,
+                                   progress=lambda i, n, s: print(f"\r  calibrating {i}/{n}", end="", flush=True))
+    print()
+    return m, evals, key + "_templates"
+
+
+def neural_setup(args):
     if args.model:
         model_path = Path(args.model)
     elif args.split == "unseen_speaker" and holdout_model_path(args.speaker).exists():
@@ -104,12 +140,11 @@ def main(argv=None):
     else:
         model_path = config.BASE_MODEL
     if not model_path.exists():
-        sys.exit(f"Model not found: {model_path}. Train one first: python train.py")
+        sys.exit(f"Model not found: {model_path}. Train one first: python train.py\n"
+                 "(Or compare the training-free baseline: python evaluate.py --recognizer templates)")
 
     runtime = LipReaderRuntime(model_path)
     ckpt, label_map = runtime.ckpt, runtime.label_map
-    phrases = load_phrases(phrase_set="full")
-    index = {pid: i for i, pid in enumerate(label_map)}
     trained_on = set(ckpt.get("speakers", []))
     clips = scan_clips(phrase_ids=set(label_map))
 
@@ -130,16 +165,22 @@ def main(argv=None):
                              s.get("val_fraction", config.VAL_FRACTION), s.get("seed", config.SEED),
                              s.get("max_reps"))
         eval_clips, split_key = splits[args.split], args.split
+    return runtime, eval_clips, split_key
+
+
+def evaluate(args, runtime, eval_clips, split_key, phrases):
+    label_map = runtime.label_map
+    index = {pid: i for i, pid in enumerate(label_map)}
     if args.session is not None:
         eval_clips = [c for c in eval_clips if c.session == args.session]
         split_key += f"_session{args.session}"
 
-    positions, kept = load_positions(eval_clips)
+    positions, kept = load_positions([c for c in eval_clips if c.phrase_id in index])
     if not kept:
         sys.exit(f"No clips to evaluate for split {split_key!r}. "
                  "(The test split is session 3; record it with collect_data.py --session 3.)")
     y = np.array([index[c.phrase_id] for c in kept])
-    probs = predict_proba(runtime.model, stack_features(positions, runtime.use_velocity))
+    probs = runtime.predict_positions(positions)
     m = compute_metrics(y, probs, label_map, phrases)
     pred = probs.argmax(1)
 
@@ -156,7 +197,7 @@ def main(argv=None):
     m["per_lighting"] = group_accuracy(kept, y, pred, lambda c: meta.get(clip_key(c), {}).get("lighting"))
     m["per_session"] = group_accuracy(kept, y, pred, lambda c: c.session)
     m["threshold_table"] = threshold_table(y, probs)
-    m["model"] = str(model_path)
+    m["model"] = runtime.describe()
     m["label_map"] = label_map
 
     # --- LLM benefit on medium-confidence predictions -----------------------
@@ -197,7 +238,7 @@ def main(argv=None):
                     config.RESULTS_DIR / f"per_phrase_accuracy{suffix}.png", f"Per-phrase accuracy - {title}")
 
     # --- Report -----------------------------------------------------------------
-    print(f"\n{title}: {m['n']} clips, model {model_path.name}")
+    print(f"\n{title}: {m['n']} clips, {runtime.describe()}")
     print(f"  top-1 accuracy        {m['top1_accuracy']:.3f}")
     print(f"  top-3 accuracy        {m['top3_accuracy']:.3f}")
     print(f"  macro F1              {m['macro_f1']:.3f}")

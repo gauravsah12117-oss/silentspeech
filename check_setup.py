@@ -76,24 +76,31 @@ def check_model_code():
 
 
 def check_camera(index, show):
+    """Returns {"cam_fps", "brightness", "face_rate"} or None if the camera failed."""
     import cv2
+    import numpy as np
     from src.landmarks import LipTracker, draw_lips
     from src.utils import open_camera
 
     cap = open_camera(index)
     if cap is None:
         report("FAIL", "Webcam", f"camera {index if index is not None else config.CAMERA_INDEX} did not open; "
-               "try --camera 1 and close Zoom/Teams/other camera apps")
-        return
+               "try --camera 1, close Zoom/Teams/other camera apps, and allow camera access for desktop apps "
+               "in Windows Settings > Privacy > Camera")
+        return None
     print("       Look at the camera for 5 seconds...")
-    raw = 0
+    raw, light = 0, []
     start = time.perf_counter()
     while time.perf_counter() - start < 2.0:          # camera speed alone (what recording uses)
         ok, frame = cap.read()
-        raw += bool(ok and frame is not None)
+        if ok and frame is not None:
+            raw += 1
+            light.append(float(frame[::8, ::8].mean()))
     cam_fps = raw / (time.perf_counter() - start)
+    brightness = float(np.median(light)) if light else 0.0
 
     frames = faces = 0
+    track_time = 0.0
     start = time.perf_counter()
     with LipTracker() as tracker:
         while time.perf_counter() - start < 3.0:      # with face tracking (what the live app does)
@@ -101,35 +108,43 @@ def check_camera(index, show):
             if not ok or frame is None:
                 continue
             frames += 1
+            t0 = time.perf_counter()
             pts = tracker.process(frame)
             if pts is not None:
                 faces += 1
+                track_time += time.perf_counter() - t0
             if show:
                 view = cv2.flip(draw_lips(frame.copy(), pts), 1)
                 cv2.imshow("SilentSpeech - setup check", view)
                 cv2.waitKey(1)
-    live_fps = frames / (time.perf_counter() - start)
     h, w = (frame.shape[:2] if frames else (0, 0))
     cap.release()
     if show:
         cv2.destroyAllWindows()
     if frames == 0:
-        report("FAIL", "Webcam", "opened but returned no frames")
-        return
+        report("FAIL", "Webcam", "opened but returned no frames (is another app using the camera?)")
+        return None
     report("PASS" if cam_fps >= config.MIN_FPS else "WARN", "Webcam",
            f"{w}x{h}, {cam_fps:.1f} FPS" +
            ("" if cam_fps >= config.MIN_FPS else
             f" (below {config.MIN_FPS}, so clips will be rejected: add light in front of you, close camera apps)"))
-    report("PASS" if live_fps >= 15 else "WARN", "Live tracking speed",
-           f"{live_fps:.1f} FPS with face tracking" +
-           ("" if live_fps >= 15 else " (slow CPU: close other apps and plug in the charger)"))
+    dark = brightness < 50
+    report("WARN" if dark else "PASS", "Lighting",
+           f"picture brightness {brightness:.0f}/255" +
+           (" - very dark: turn on a light in front of you, or open the camera's privacy shutter" if dark else ""))
     rate = faces / frames
     if rate >= 0.9:
         report("PASS", "Face detection", f"face found in {rate:.0%} of frames")
     elif rate > 0:
         report("WARN", "Face detection", f"face found in only {rate:.0%} of frames; light your face from the front")
     else:
-        report("FAIL", "Face detection", "no face found; sit 40-70 cm away facing the camera, light from the front")
+        report("FAIL", "Face detection", "no face found; sit 40-70 cm away facing the camera, light from the front"
+               + (" (the picture is very dark)" if dark else ""))
+    if faces:
+        ms = track_time / faces * 1000
+        report("PASS" if ms < 45 else "WARN", "Face tracking speed",
+               f"{ms:.0f} ms per frame" + ("" if ms < 45 else " (slow CPU: close other apps, plug in the charger)"))
+    return {"cam_fps": cam_fps, "brightness": brightness, "face_rate": rate}
 
 
 def check_audio(play):

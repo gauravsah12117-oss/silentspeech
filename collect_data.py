@@ -6,7 +6,11 @@ The recorder shows a phrase, counts down 3-2-1, records 2.5 seconds (red dot),
 then checks the clip automatically. Each clip is saved as soon as it passes,
 so you can quit at any time and resume later with the same command.
 
-Keys: SPACE record   R redo last clip   N next phrase   Q save and quit
+Keys: SPACE record   R redo last clip   N skip phrase   Q save and quit
+
+Faster hands-free recording: --auto starts each clip by itself (P pauses),
+--order round goes through the whole list once per round, --countdown 2
+shortens the 3-2-1.
 
 Saved: data/raw/<speaker>/<phrase_id>/<session>_<rep>.npy, shape (frames, 42, 3)
 (40 lip points + 2 eye corners, x/y/z in pixel units, NaN where the face was
@@ -127,9 +131,13 @@ class Recorder:
     def notify(self, message, ok=True, seconds=2.5):
         self.flash = (message, (120, 220, 120) if ok else (60, 160, 255), time.time() + seconds)
 
-    def wait_key(self, lines, keys):
-        """Preview until one of `keys` (lower-case characters) is pressed."""
-        while True:
+    def wait_key(self, lines, keys, timeout=None):
+        """Preview until one of `keys` (lower-case characters) is pressed.
+
+        With a timeout, returns None when it runs out.
+        """
+        end = None if timeout is None else time.perf_counter() + timeout
+        while end is None or time.perf_counter() < end:
             frame, pts = self.read()
             if frame is None:
                 continue
@@ -141,6 +149,7 @@ class Recorder:
                 ch = "q"
             if ch in keys:
                 return ch
+        return None
 
     def countdown(self, lines, seconds=config.COUNTDOWN_SECONDS):
         end = time.perf_counter() + seconds
@@ -191,59 +200,84 @@ def save_video(frames, fps, path):
 # --- Recording session -------------------------------------------------------
 
 def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=False,
-                   camera_index=None, title="Recording"):
+                   camera_index=None, title="Recording", auto_advance=False, order="phrase",
+                   countdown=config.COUNTDOWN_SECONDS):
     """Record `reps` clips of every phrase for one speaker and session.
 
     phrases: {phrase_id: phrase_dict}. Returns {phrase_id: clips now on disk}.
+    auto_advance: start the next clip by itself (P pauses), so you only mouth.
+    order: "phrase" records all clips of one phrase before the next;
+           "round" goes through the whole list once per round (more variety).
     """
     cap = open_camera(camera_index)
     if cap is None:
         sys.exit("Could not open the webcam. Try --camera 1 and close Zoom/Teams. "
                  "Run python check_setup.py for details.")
     items = list(phrases.values())
-    saved_stack = []  # (path, phrase index) so R can step back across phrases
+    saved_stack = []          # paths, so R can undo across phrases
+    skipped = set()
+    paused = not auto_advance
+    rejected_in_a_row = 0
     with LipTracker() as tracker:
         rec = Recorder(cap, tracker)
-        pi = 0
         try:
-            while pi < len(items):
+            while True:
+                counts = {p["id"]: len(existing_reps(speaker, p["id"], session)) for p in items}
+                todo = [i for i, p in enumerate(items) if p["id"] not in skipped and counts[p["id"]] < reps]
+                if not todo:
+                    break
+                pi = min(todo, key=lambda i: (counts[items[i]["id"]], i)) if order == "round" else todo[0]
                 p = items[pi]
                 have = existing_reps(speaker, p["id"], session)
-                if len(have) >= reps:
-                    pi += 1
-                    continue
                 n_done = len(have)
-                header = [f"{pi + 1}/{len(items)}  {p['text']}",
-                          f"Clip {n_done + 1} of {reps}  ({SPEED_HINTS[n_done % 3]})  |  "
-                          f"{title}: speaker {speaker}, session {session}",
+                done = sum(min(c, reps) for c in counts.values())
+                header = [p["text"],
+                          f"Clip {n_done + 1} of {reps} for this phrase ({SPEED_HINTS[n_done % 3]})  |  "
+                          f"{done}/{reps * len(items)} done  |  {title}: {speaker}, session {session}",
                           "Start and end with lips gently closed. Mouth silently, no sound.",
-                          "SPACE record   R redo last   N next phrase   Q save and quit"]
-                key = rec.wait_key(header, " rnq")
+                          "SPACE record   R redo last   N skip phrase   Q save and quit"
+                          + ("   P pause" if auto_advance else "")]
+                if paused:
+                    key = rec.wait_key(header, " rnq")
+                    if key == " " and auto_advance:
+                        paused = False
+                else:
+                    key = rec.wait_key(header, " rnqp", timeout=0.8) or " "
+                    if key == "p":
+                        paused = True
+                        rec.notify("Paused. Press SPACE to carry on.")
+                        continue
                 if key == "q":
                     break
                 if key == "n":
-                    pi += 1
+                    skipped.add(p["id"])
                     continue
                 if key == "r":
                     if saved_stack:
-                        path, idx = saved_stack.pop()
+                        path = saved_stack.pop()
                         path.unlink(missing_ok=True)
                         remove_metadata(path.relative_to(config.DATA_DIR).as_posix())
-                        pi = idx
-                        rec.notify(f"Deleted {path.name} - record it again")
+                        rec.notify(f"Deleted {path.parent.name}/{path.name} - record it again")
                     else:
                         rec.notify("Nothing to redo yet", ok=False)
                     continue
 
-                # SPACE: countdown, capture, check, save
-                if not rec.countdown(header):
+                # SPACE (or auto-advance): countdown, capture, check, save
+                if not rec.countdown(header, countdown):
                     break
                 clip, duration, frames = rec.capture(config.RECORD_SECONDS, header,
                                                      keep_frames=config.SAVE_VIDEO)
                 ok, reason, stats = check_clip(clip, duration)
                 if not ok:
-                    rec.notify(f"Rejected: {reason}. Press SPACE to try again.", ok=False, seconds=4)
+                    rejected_in_a_row += 1
+                    if auto_advance and rejected_in_a_row >= 3:
+                        paused = True
+                        rec.notify(f"Rejected 3 times ({reason}). Paused - fix it, then press SPACE.",
+                                   ok=False, seconds=8)
+                    else:
+                        rec.notify(f"Rejected: {reason}. Try again.", ok=False, seconds=4)
                     continue
+                rejected_in_a_row = 0
                 rep = (have[-1] + 1) if have else 1
                 path = clip_dir(speaker, p["id"]) / f"{session}_{rep:02d}.npy"
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -257,8 +291,8 @@ def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=
                 if config.SAVE_VIDEO:
                     save_video(frames, stats["fps"],
                                config.VIDEO_DIR / speaker / p["id"] / f"{session}_{rep:02d}.mp4")
-                saved_stack.append((path, pi))
-                rec.notify(f"Saved {p['id']} clip {len(have) + 1}/{reps} "
+                saved_stack.append(path)
+                rec.notify(f"Saved \"{p['text']}\" clip {len(have) + 1}/{reps} "
                            f"({stats['frames']} frames, {stats['fps']:.0f} FPS)")
         finally:
             rec.close()
@@ -276,6 +310,11 @@ def main():
     ap.add_argument("--lighting", default="unknown", help="e.g. daylight, tubelight, dim")
     ap.add_argument("--glasses", action="store_true", help="speaker is wearing glasses")
     ap.add_argument("--camera", type=int, default=None, help="webcam index (default from config.py)")
+    ap.add_argument("--auto", action="store_true",
+                    help="start each clip by itself after the previous one (P pauses)")
+    ap.add_argument("--order", choices=["phrase", "round"], default="phrase",
+                    help="'round' goes through the whole list once per round")
+    ap.add_argument("--countdown", type=float, default=config.COUNTDOWN_SECONDS)
     args = ap.parse_args()
 
     phrases = load_phrases(phrase_set=args.phrase_set)
@@ -287,7 +326,8 @@ def main():
         phrases = {pid: phrases[pid] for pid in wanted}
 
     counts = record_phrases(args.speaker, args.session, args.reps, phrases,
-                            args.lighting, args.glasses, args.camera)
+                            args.lighting, args.glasses, args.camera, auto_advance=args.auto,
+                            order=args.order, countdown=args.countdown)
     done = sum(min(c, args.reps) for c in counts.values())
     print(f"\nSession {args.session} for {args.speaker}: {done}/{args.reps * len(counts)} clips recorded.")
     todo = [pid for pid, c in counts.items() if c < args.reps]

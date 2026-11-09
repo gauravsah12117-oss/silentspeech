@@ -1,5 +1,7 @@
 # Keep line endings consistent between Windows and macOS/Linux teammates
 * text=auto
+*.bat text eol=crlf
+*.sh text eol=lf
 *.png binary
 *.wav binary
 *.npy binary

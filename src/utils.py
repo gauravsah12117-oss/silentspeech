@@ -77,15 +77,6 @@ def holdout_model_path(speaker):
     return config.MODEL_DIR / f"lipreader_holdout_{speaker}.pt"
 
 
-def resolve_model(speaker=None, explicit=None):
-    """The enrolled model for this speaker if there is one, else the base model."""
-    if explicit:
-        return Path(explicit)
-    if speaker and personal_model_path(speaker).exists():
-        return personal_model_path(speaker)
-    return config.BASE_MODEL
-
-
 # --- Camera ------------------------------------------------------------------
 
 def open_camera(index=None, width=None, height=None):

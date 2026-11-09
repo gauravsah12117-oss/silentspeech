@@ -156,6 +156,8 @@ def predict_proba(model, features, batch_size=256):
 class LipReaderRuntime:
     """Everything the live app needs: load once, then predict from raw clips."""
 
+    kind = "neural"
+
     def __init__(self, path):
         torch.set_num_threads(max(1, min(4, torch.get_num_threads())))
         self.path = path
@@ -163,6 +165,14 @@ class LipReaderRuntime:
         self.label_map = self.ckpt["label_map"]
         self.use_velocity = self.ckpt["model_config"].get("use_velocity", True)
         self.n_frames = self.ckpt["model_config"].get("n_frames", config.TARGET_FRAMES)
+
+    def describe(self):
+        return f"neural model {getattr(self.path, 'name', self.path)} ({len(self.label_map)} phrases)"
+
+    def predict_positions(self, positions):
+        from src.features import to_features
+        feats = np.stack([to_features(p, self.use_velocity, self.n_frames) for p in positions])
+        return predict_proba(self.model, feats)
 
     def predict_clip(self, clip):
         """Raw clip (T, 42, 3) -> (probabilities, milliseconds), or (None, ms)."""

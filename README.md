@@ -14,6 +14,22 @@ SilentSpeech is a real-time, software-only assistive system. It reads silent lip
 
 ---
 
+## Quick start (about 10 minutes)
+
+**Windows:** double-click `start.bat`. **macOS / Linux:** `sh start.sh`. (Or run `python start.py` in an activated environment.)
+
+The first run installs everything (about 1 GB). Then a guided setup:
+
+1. **Check:** camera, face tracking, lighting and speakers.
+2. **Calibrate:** silently mouth 10 demo phrases, 4 times each. The recorder moves on by itself (about 4 minutes).
+3. **Self-test:** it reports how well your clips were recognised and offers extra clips for weak phrases.
+4. **Voice:** say each phrase once to use your own voice, or use the computer voice.
+5. **Live app:** press SPACE, mouth a phrase, and hear it.
+
+No training is needed: the *instant templates* recogniser compares what you mouth with your own calibration clips (section 6.7). For the competition dataset and the neural model, follow sections 13–15. Run `start.py` again any time; finished steps are skipped.
+
+---
+
 ## Table of contents
 
 1. [Problem statement](#1-problem-statement)
@@ -77,12 +93,13 @@ Everything runs on a normal laptop CPU. No special sensors, no GPU, no cost.
 | Feature | What it does |
 |---|---|
 | **Real-time silent lip reading** | Recognises 30–50 essential phrases from silent mouthing through a webcam. |
-| **Own-voice output** | Speaks in a clone of the user's real voice instead of a robotic voice. |
+| **Own-voice output** | Speaks in the user's real recorded voice, or a clone of it, instead of a robotic voice. |
 | **Context-aware correction** | An LLM re-ranks the model's top guesses using the recent conversation. |
 | **Sentence builder** | Combines phrases ("I need water" + "Call my mother") into one message. |
 | **Safe when unsure** | If confidence is low, it shows its top 3 guesses instead of speaking the wrong thing. |
 | **Emergency alert** | Critical phrases such as "I can't breathe" trigger an on-screen and sound alert for caregivers. |
 | **Quick personalisation** | A new user can enrol in about 10 minutes. |
+| **Works without training** | After 4 clips per phrase, an instant recogniser is ready in seconds on any laptop. |
 | **Privacy by design** | Stores only lip coordinates, never raw video. Can run fully offline. |
 | **Multilingual-ready** | The phrase set can be recorded in any language, including Indian languages. |
 
@@ -123,6 +140,8 @@ flowchart LR
 | Dataset | `src/dataset.py` | Loads clips, applies augmentation, creates train/val/test splits |
 | Augmentation | `src/augment.py` | Realistic variations of each clip for training |
 | Model | `src/model.py` | Conv1D + BiGRU + attention lip-reading network |
+| Instant templates | `src/templates.py` | Training-free recogniser: DTW nearest neighbours with calibrated confidence |
+| Recogniser choice | `src/recognizer.py` | Picks the neural model or the speaker's templates |
 | Decision logic | `src/decision.py` | Applies confidence thresholds and emergency rules |
 | Metrics | `src/metrics.py` | Accuracy, F1, emergency recall, confusion matrix |
 | LLM corrector | `src/llm_corrector.py` | Re-ranks uncertain predictions using conversation context |
@@ -203,6 +222,17 @@ The app supports two modes:
 
 These thresholds are starting values and are tuned on the validation set (see [section 15](#15-evaluation-and-results)). For emergency phrases, missing a real emergency is worse than a false alarm, so the alert threshold is deliberately lower.
 
+### 6.7 Instant templates (no training)
+
+The neural model needs hundreds of clips and a long training run (hours on a low-power laptop). For a new user, or when there is no time to train, SilentSpeech uses **nearest-neighbour matching with dynamic time warping (DTW)**:
+
+1. Each calibration clip is reduced to a *signature*: still frames before and after the phrase are cut off, and every frame is stored as its change from the resting mouth shape, resampled to 32 frames.
+2. A new clip is compared with every stored signature. DTW lines the two up in time, so speaking faster or slower doesn't matter.
+3. The phrase whose examples are closest wins. Confidence comes from how clearly it beats the runner-up, relative to the distance, so a whole-session shift (new day, new light) doesn't destroy it.
+4. **Calibration:** each calibration clip is recognised from all the others (leave-one-out). That gives an accuracy estimate and sets the confidence scale so that average confidence equals measured accuracy. A clip far from every phrase (talking, laughing, a phrase not in the list) gets low confidence and is never spoken directly.
+
+The app uses the neural model when it has been trained or enrolled on that speaker, and the templates otherwise (`--recognizer` overrides). `evaluate.py --recognizer templates` reports the templates as a training-free baseline next to the neural model, which is a useful comparison for the results slide.
+
 ---
 
 ## 7. Tech stack
@@ -213,6 +243,7 @@ These thresholds are starting values and are tuned on the validation set (see [s
 | Webcam and video | OpenCV | Fast camera capture and on-screen display |
 | Face landmarks | MediaPipe Face Mesh | Accurate 468-point face tracking, runs in real time on a CPU |
 | Deep learning | PyTorch | Flexible and widely used for research-style models |
+| Instant recogniser | DTW nearest neighbours in NumPy | Works from 4 clips per phrase, no training, ~15 ms per prediction |
 | Metrics and charts | scikit-learn, Matplotlib | Confusion matrices, F1 scores, training curves |
 | LLM (optional) | Claude, Gemini or OpenAI API over plain HTTPS (no SDK needed), or a local model via Ollama | Context-based re-ranking of uncertain predictions |
 | Voice cloning | XTTS-v2 via the `coqui-tts` package, run on Google Colab's free GPU | Clones a voice from a short sample, supports 17 languages including Hindi |
@@ -233,9 +264,12 @@ silentspeech/
 ├── requirements.txt
 ├── .env.example              # template for API keys (copy to .env)
 ├── .gitignore                # excludes data/, audio/, .env, models/*.pt
+├── start.bat / start.sh      # double-click: install (first time) and run start.py
+├── start.py                  # guided quick start: check, calibrate, voice, live app
 ├── config.py                 # all settings in one place
 ├── check_setup.py            # verifies webcam, libraries and audio
 ├── collect_data.py           # records lip-landmark clips for each phrase
+├── record_voice.py           # records each phrase in the user's own voice
 ├── train.py                  # trains the lip-reading model (+ experiments)
 ├── evaluate.py               # accuracy, confusion matrix, latency
 ├── enroll.py                 # quick personalisation for a new user
@@ -248,6 +282,8 @@ silentspeech/
 │   ├── dataset.py
 │   ├── augment.py
 │   ├── model.py
+│   ├── templates.py
+│   ├── recognizer.py
 │   ├── decision.py
 │   ├── metrics.py
 │   ├── llm_corrector.py
@@ -257,8 +293,10 @@ silentspeech/
 │   └── voice_cloning_colab.ipynb   # renders cloned-voice audio on free GPU
 ├── tools/
 │   └── make_synthetic_data.py      # fake clips to smoke-test the pipeline without a webcam
-├── tests/
-│   └── test_core.py                # unit tests (python -m unittest discover -s tests)
+├── tests/                          # python -m unittest discover -s tests
+│   ├── test_core.py
+│   ├── test_templates.py
+│   └── test_llm_http.py            # LLM layer against a local mock server
 ├── data/
 │   ├── raw/<speaker>/<phrase_id>/<session>_<rep>.npy
 │   └── metadata.csv
@@ -267,7 +305,8 @@ silentspeech/
 │   └── label_map.json
 ├── audio/
 │   ├── voice_samples/<speaker>.wav          # consented voice recordings
-│   └── phrase_audio/<speaker>/<phrase_id>.wav
+│   ├── phrase_audio/<speaker>/<phrase_id>.wav   # own or cloned voice (+ voice.json)
+│   └── tts_cache/                           # pre-rendered computer voice
 ├── results/
 │   ├── metrics.json
 │   ├── experiments.csv
@@ -516,6 +555,8 @@ python collect_data.py --speaker s01 --session 3 --reps 6 --lighting dim
 
 The recorder shows the phrase on screen, counts down 3-2-1, records for 2.5 seconds (a red dot appears), then checks the clip's quality automatically. Progress is saved, so you can stop and resume any time by running the same command again.
 
+For hands-free recording, add `--auto` (each clip starts by itself; P pauses), `--order round` (one pass through the whole list per round, for more natural variety) and `--countdown 2`.
+
 | Key | Action |
 |---|---|
 | SPACE | Start recording the current clip |
@@ -639,6 +680,7 @@ Each training run adds a row to `results/experiments.csv`, which is your results
 | Ablation: no attention layer | `python train.py --no-attention --tag no_attention` |
 | Model comparison: BiGRU only | `python train.py --arch bigru --tag bigru_only` |
 | Model comparison: small Transformer | `python train.py --arch transformer --tag transformer` |
+| Training-free baseline (DTW templates) | `python evaluate.py --split test --recognizer templates` |
 | Learning curve | `python train.py --learning-curve` → `results/learning_curve.png` |
 | Lighting robustness | `python evaluate.py --split all` (per-lighting accuracy from the `--lighting` labels) |
 | Personalisation gain | `python evaluate.py --split unseen_speaker --speaker new01 --session 2`, then again with `--model models/lipreader_new01.pt` |
@@ -673,15 +715,20 @@ python app.py --mode auto          # automatic start/stop detection
 python app.py --voice default      # use offline pyttsx3 voice
 python app.py --no-llm             # fully offline mode
 python app.py --speaker s02        # use another teammate's voice and model
+python app.py --recognizer templates   # force the instant templates (or: neural)
 ```
+
+The app picks the recogniser automatically: the neural model if it was trained or enrolled on this speaker, otherwise the speaker's calibration templates from `start.py`.
 
 ### What the screen shows
 
 - **Left:** live webcam feed with lip landmarks drawn on the mouth
 - **Top right:** the predicted phrase, with confidence bars for the top 3 guesses
 - **Middle right:** the sentence being built
-- **Bottom:** status bar showing the mode, FPS, LLM on/off, voice mode, latency, and live MAR/motion values
+- **Bottom:** status bar showing the mode, FPS, recogniser, LLM on/off, latency, and live MAR/motion values
+- **Top banner:** names the output voice honestly: own recorded voice, cloned voice (AI-generated), or computer voice
 - **Alert banner:** turns red with a sound when an emergency phrase is detected
+- **Warnings on the video:** "No face detected" and "Too dark" with what to do
 
 ### Keyboard controls
 
@@ -745,6 +792,20 @@ The LLM receives only phrase text and probabilities, never images, video or land
 
 Voice banking means recording a person's voice while they still have it, so a digital copy can speak for them later. For people who have already lost their voice, family members can often supply old voice notes or videos.
 
+### Option A: record the phrases directly (fastest, no GPU)
+
+If the person can still speak, record each phrase once in their real voice:
+
+```bash
+python record_voice.py --speaker s01
+```
+
+Press SPACE and say the phrase. Recording stops by itself when you finish, and each clip is trimmed, levelled and played back for approval. Clips go to `audio/phrase_audio/<speaker>/`, where the app finds them, and are marked as genuine recordings, so the app labels them "own recorded voice" rather than AI-generated. `start.py` offers this in its voice step.
+
+### Option B: clone the voice (for someone who has already lost it)
+
+`python record_voice.py --speaker s01 --sample` records a clean 45–60 second sample for the notebook. For someone who can no longer speak, use old voice notes or videos instead.
+
 ### Steps
 
 1. **Get consent.** The voice owner signs the consent form and agrees to how their voice will be used.
@@ -763,7 +824,7 @@ XTTS-v2 supports 17 languages, including Hindi. For other Indian languages it do
 
 ### Fallback
 
-If cloned audio is missing for a phrase, the app automatically uses the offline pyttsx3 voice, so the demo never goes silent.
+If cloned audio is missing for a phrase, the app automatically uses the offline pyttsx3 voice, so the demo never goes silent. That voice is pre-rendered into `audio/tts_cache/` (by `start.py`, or in the background while the app is idle), so it also starts almost instantly.
 
 ### License note
 
@@ -772,6 +833,11 @@ The XTTS-v2 model is released under a non-commercial license. That's fine for a 
 ---
 
 ## 19. New-user enrolment (personalisation)
+
+There are two ways to personalise:
+
+- **Calibration (`start.py`):** 4 clips per phrase feed the instant templates. Nothing is trained, so it works on any laptop within minutes, but only for the person who calibrated.
+- **Enrolment (`enroll.py`):** fine-tunes the neural model, which needs a trained base model.
 
 A model trained on four teammates won't be perfect for a fifth person, because everyone moves their lips a little differently. Enrolment fixes this quickly:
 
@@ -823,6 +889,8 @@ Being open about these limits in the presentation shows maturity and builds trus
 | `pip install mediapipe` fails | Unsupported Python version | Use Python 3.10, 3.11 or 3.12 in a fresh virtual environment, and upgrade pip first |
 | `cv2` import errors or missing functions | Both `opencv-python` and `opencv-contrib-python` installed | `pip uninstall -y opencv-python opencv-contrib-python` then `pip install opencv-contrib-python` |
 | Face not detected | Poor lighting or position | Face a light source, sit 40–70 cm away, and look straight at the camera |
+| `check_setup.py` says the picture is very dark | Dim room, light behind you, or the camera's privacy shutter is closed | Put a lamp in front of you and open the shutter; the app also shows "Too dark" |
+| The app often says "please repeat" | Calibration clips differ from how you mouth now | Run `python start.py --recalibrate` in the same light you'll demo in, and mouth clearly |
 | Every clip is rejected as "camera too slow" | Webcam drops to 15 FPS in dim light | Add light in front of you, close other apps, plug in the charger |
 | Very low accuracy | Look-alike phrases, unbalanced data, or random splitting | Check the confusion matrix, rename confused phrases, balance clip counts, split by session |
 | Good test accuracy, poor live accuracy | Live conditions differ from recordings | Record an extra session in the demo venue's lighting, or run a quick enrolment there |

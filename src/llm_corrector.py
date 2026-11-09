@@ -135,7 +135,7 @@ class LLMCorrector:
     def _call(self, prompt):
         if self.provider == "claude":
             data = self._post(
-                "https://api.anthropic.com/v1/messages",
+                config.LLM_ENDPOINTS["claude"],
                 {"model": self.model, "max_tokens": 120,
                  "messages": [{"role": "user", "content": prompt}]},
                 {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"})
@@ -143,7 +143,7 @@ class LLMCorrector:
 
         if self.provider == "openai":
             data = self._post(
-                "https://api.openai.com/v1/chat/completions",
+                config.LLM_ENDPOINTS["openai"],
                 {"model": self.model, "max_completion_tokens": 120,
                  "response_format": {"type": "json_object"},
                  "messages": [{"role": "user", "content": prompt}]},
@@ -152,7 +152,7 @@ class LLMCorrector:
 
         if self.provider == "gemini":
             data = self._post(
-                f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent",
+                config.LLM_ENDPOINTS["gemini"].format(model=self.model),
                 {"contents": [{"parts": [{"text": prompt}]}],
                  "generationConfig": {"responseMimeType": "application/json",
                                       "maxOutputTokens": 120,

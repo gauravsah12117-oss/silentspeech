@@ -46,6 +46,11 @@ LLM_MODELS = {
     "ollama": "llama3.2:3b",
 }
 OLLAMA_URL = "http://localhost:11434"
+LLM_ENDPOINTS = {
+    "claude": "https://api.anthropic.com/v1/messages",
+    "openai": "https://api.openai.com/v1/chat/completions",
+    "gemini": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
+}
 
 # --- Voice -----------------------------------------------------------------
 VOICE_MODE = "cloned"         # "cloned" (pre-rendered clips) or "default" (pyttsx3)
@@ -96,6 +101,13 @@ AUGMENT = {
     "noise_std": 0.01,        # Gaussian landmark jitter
     "frame_dropout": 0.05,    # up to 5% frozen/dropped frames
 }
+
+# --- Quick start (start.py) --------------------------------------------------
+# Ten useful, visually varied phrases for a first demo (includes the README's
+# "I need water" -> "Call my mother" demo and two emergency phrases).
+QUICKSTART_PHRASES = ["P01", "P09", "P10", "P12", "P16", "P17", "P22", "P23", "P28", "P30"]
+QUICKSTART_REPS = 4           # calibration clips per phrase (instant templates need 3+)
+QUICKSTART_COUNTDOWN = 2      # seconds of 3-2-1 before each calibration clip
 
 # --- Enrolment (enroll.py) -------------------------------------------------
 ENROLL_SECONDS = 60           # fine-tuning time budget
