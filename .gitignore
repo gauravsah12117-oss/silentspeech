@@ -3,7 +3,9 @@ data/
 audio/
 .env
 models/*.pt
+models/*.npz
 models/experiments/
+logs/
 
 # Python
 venv/

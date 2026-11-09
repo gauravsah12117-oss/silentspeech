@@ -19,18 +19,61 @@ neural model, see README sections 13-15.
 import argparse
 import re
 import sys
+import traceback
+from datetime import datetime
 
 import config
 from src.utils import load_env, load_phrases
 
 CAL_SESSION = 1
+_LOG = None   # session log file (everything shown in the window, plus the answers)
+
+
+class _Tee:
+    """Writes to the console and to the session log."""
+
+    def __init__(self, stream, log):
+        self._stream, self._log = stream, log
+
+    def write(self, text):
+        n = self._stream.write(text)
+        try:
+            self._log.write(text)
+            self._log.flush()
+        except (OSError, ValueError):
+            pass
+        return n
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def start_log():
+    global _LOG
+    folder = config.WORK_DIR / "logs"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"start-{datetime.now():%Y%m%d-%H%M%S}.log"
+    _LOG = open(path, "a", encoding="utf-8", errors="replace")
+    sys.stdout, sys.stderr = _Tee(sys.stdout, _LOG), _Tee(sys.stderr, _LOG)
+    return path
+
+
+def _log_answer(prompt, answer):
+    if _LOG:
+        _LOG.write(f"{prompt.strip()} -> {answer!r}\n")
+        _LOG.flush()
 
 
 def ask(prompt, default=""):
+    text = f"{prompt} [{default}]: " if default else f"{prompt}: "
     try:
-        answer = input(f"{prompt} [{default}]: " if default else f"{prompt}: ").strip()
+        answer = input(text).strip()
     except EOFError:
         answer = ""
+    _log_answer(text, answer or default)
     return answer or default
 
 
@@ -39,6 +82,7 @@ def wait_enter(prompt):
         input(prompt)
     except EOFError:
         pass
+    _log_answer(prompt, "Enter")
 
 
 def yes(prompt, default=True):
@@ -214,7 +258,17 @@ def main(argv=None):
     from app import App
     App(argparse.Namespace(mode="ptt", voice="cloned", no_llm=False, speaker=speaker, camera=args.camera,
                            model=None, recognizer="auto")).run()
+    print("\nThe live app is closed. Run start.bat again any time.")
 
 
 if __name__ == "__main__":
-    main()
+    log_path = start_log()
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\nStopped.")
+    except Exception:
+        traceback.print_exc()
+        print(f"\nSomething went wrong. The details are saved in:\n  {log_path}\n"
+              "Send that file to whoever is helping you.")
+        sys.exit(1)
