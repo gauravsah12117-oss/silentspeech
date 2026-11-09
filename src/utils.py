@@ -95,6 +95,18 @@ def open_camera(index=None, width=None, height=None):
     return cap
 
 
+def make_window(name, width, height):
+    """A resizable OpenCV window that opens on top of the console."""
+    import cv2
+
+    cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+    cv2.resizeWindow(name, width, height)
+    try:
+        cv2.setWindowProperty(name, cv2.WND_PROP_TOPMOST, 1)
+    except Exception:  # not supported by every OpenCV build
+        pass
+
+
 class FPSCounter:
     def __init__(self, alpha=0.1):
         self.alpha = alpha

@@ -24,7 +24,7 @@ import numpy as np
 
 import config
 from src.speaker import mark_recorded, trim_and_level, voice_dir
-from src.utils import draw_text, load_phrases, wrap_text
+from src.utils import draw_text, load_phrases, make_window, wrap_text
 
 WINDOW = "SilentSpeech - record your voice"
 W, H = 800, 330
@@ -53,8 +53,7 @@ class VoiceRecorder:
         self.mic_name = dev["name"]
         self.sr = int(dev["default_samplerate"]) or 44100
         self.noise = 0.0
-        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW, W, H)
+        make_window(WINDOW, W, H)
 
     # -- screen -------------------------------------------------------------
     def show(self, title, lines, level=None, color=(255, 255, 255), progress=None):

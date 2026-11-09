@@ -28,7 +28,7 @@ import numpy as np
 import config
 from src.features import check_clip
 from src.landmarks import N_POINTS, LipTracker, draw_lips
-from src.utils import draw_text, load_phrases, open_camera
+from src.utils import draw_text, load_phrases, make_window, open_camera
 
 WINDOW = "SilentSpeech - recorder"
 METADATA_FIELDS = ["file", "speaker", "session", "phrase_id", "phrase_text", "frames", "fps",
@@ -82,8 +82,7 @@ class Recorder:
         self.tracker = tracker
         self.window = window
         self.flash = None          # (message, colour, until)
-        cv2.namedWindow(window, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(window, config.FRAME_WIDTH, config.FRAME_HEIGHT + self.PANEL_H)
+        make_window(window, config.FRAME_WIDTH, config.FRAME_HEIGHT + self.PANEL_H)
 
     def grab(self):
         ok, frame = self.cap.read()

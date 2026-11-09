@@ -80,7 +80,7 @@ def check_camera(index, show):
     import cv2
     import numpy as np
     from src.landmarks import LipTracker, draw_lips
-    from src.utils import open_camera
+    from src.utils import draw_text, make_window, open_camera
 
     cap = open_camera(index)
     if cap is None:
@@ -89,6 +89,16 @@ def check_camera(index, show):
                "in Windows Settings > Privacy > Camera")
         return None
     print("       Look at the camera for 5 seconds...")
+    window = "SilentSpeech - camera check"
+    if show:
+        make_window(window, 640, 480)
+
+    def preview(img, pts=None):
+        view = cv2.flip(draw_lips(img.copy(), pts), 1)
+        draw_text(view, "Camera check: look at the screen", (14, 30), 0.7, (255, 255, 255), 2)
+        cv2.imshow(window, view)
+        cv2.waitKey(1)
+
     raw, light = 0, []
     start = time.perf_counter()
     while time.perf_counter() - start < 2.0:          # camera speed alone (what recording uses)
@@ -96,6 +106,8 @@ def check_camera(index, show):
         if ok and frame is not None:
             raw += 1
             light.append(float(frame[::8, ::8].mean()))
+            if show:
+                preview(frame)
     cam_fps = raw / (time.perf_counter() - start)
     brightness = float(np.median(light)) if light else 0.0
 
@@ -114,13 +126,12 @@ def check_camera(index, show):
                 faces += 1
                 track_time += time.perf_counter() - t0
             if show:
-                view = cv2.flip(draw_lips(frame.copy(), pts), 1)
-                cv2.imshow("SilentSpeech - setup check", view)
-                cv2.waitKey(1)
+                preview(frame, pts)
     h, w = (frame.shape[:2] if frames else (0, 0))
     cap.release()
     if show:
-        cv2.destroyAllWindows()
+        cv2.destroyWindow(window)
+        cv2.waitKey(1)
     if frames == 0:
         report("FAIL", "Webcam", "opened but returned no frames (is another app using the camera?)")
         return None

@@ -34,6 +34,13 @@ def ask(prompt, default=""):
     return answer or default
 
 
+def wait_enter(prompt):
+    try:
+        input(prompt)
+    except EOFError:
+        pass
+
+
 def yes(prompt, default=True):
     return ask(prompt + (" (Y/n)" if default else " (y/N)"), "y" if default else "n").lower().startswith("y")
 
@@ -91,7 +98,7 @@ def record(speaker, session, reps, phrases, camera, title):
     print("  - when the red REC dot appears, SILENTLY mouth the phrase shown (no sound),")
     print("  - close your lips again. It moves on by itself.")
     print("  Keys in that window: P pause, R redo the last clip, N skip a phrase, Q stop (progress is kept).")
-    input("Press Enter to open the camera window...")
+    wait_enter("Press Enter to open the camera window...")
     record_phrases(speaker, session, reps, phrases, camera_index=camera, title=title,
                    auto_advance=True, order="round", countdown=config.QUICKSTART_COUNTDOWN)
 
@@ -203,7 +210,7 @@ def main(argv=None):
     llm.close()
     print("In the app: press SPACE, then silently mouth a phrase within 2.5 seconds.")
     print("1/2/3 pick an option when it is unsure, ENTER speaks the whole sentence, Q quits.")
-    input("Press Enter to start...")
+    wait_enter("Press Enter to start...")
     from app import App
     App(argparse.Namespace(mode="ptt", voice="cloned", no_llm=False, speaker=speaker, camera=args.camera,
                            model=None, recognizer="auto")).run()

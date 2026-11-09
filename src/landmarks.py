@@ -9,6 +9,10 @@ MediaPipe's own x and y are fractions of the image width and height, which
 have different scales on a 4:3 frame; converting to pixels keeps angles and
 distances correct, so normalisation can rotate the points properly.
 """
+import os
+import sys
+from contextlib import contextmanager
+
 import numpy as np
 
 # Rings run: left mouth corner -> along the lower lip -> right corner -> along
@@ -42,19 +46,40 @@ def _mirror_permutation():
 MIRROR_PERM = _mirror_permutation()
 
 
+@contextmanager
+def _quiet_native_stderr():
+    """Silence C/C++ log lines (TensorFlow Lite, absl) that look like errors but aren't."""
+    try:
+        fd = sys.stderr.fileno()
+    except (AttributeError, OSError, ValueError):
+        yield
+        return
+    sys.stderr.flush()
+    saved, devnull = os.dup(fd), os.open(os.devnull, os.O_WRONLY)
+    os.dup2(devnull, fd)
+    try:
+        yield
+    finally:
+        os.dup2(saved, fd)
+        os.close(saved)
+        os.close(devnull)
+
+
 class LipTracker:
     """Wraps MediaPipe Face Mesh and returns the 42 points we use."""
 
     def __init__(self, min_detection_confidence=0.5, min_tracking_confidence=0.5):
         import mediapipe as mp  # imported here so the rest of the code runs without it
 
-        self._mesh = mp.solutions.face_mesh.FaceMesh(
-            static_image_mode=False,
-            max_num_faces=1,
-            refine_landmarks=False,
-            min_detection_confidence=min_detection_confidence,
-            min_tracking_confidence=min_tracking_confidence,
-        )
+        with _quiet_native_stderr():
+            self._mesh = mp.solutions.face_mesh.FaceMesh(
+                static_image_mode=False,
+                max_num_faces=1,
+                refine_landmarks=False,
+                min_detection_confidence=min_detection_confidence,
+                min_tracking_confidence=min_tracking_confidence,
+            )
+        self._warmed_up = False
 
     def process(self, frame_bgr):
         """Return a (42, 3) float32 array in pixel units, or None if no face."""
@@ -63,7 +88,12 @@ class LipTracker:
         h, w = frame_bgr.shape[:2]
         rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
-        result = self._mesh.process(rgb)
+        if not self._warmed_up:          # the first run prints the start-up chatter
+            with _quiet_native_stderr():
+                result = self._mesh.process(rgb)
+            self._warmed_up = True
+        else:
+            result = self._mesh.process(rgb)
         if not result.multi_face_landmarks:
             return None
         lm = result.multi_face_landmarks[0].landmark

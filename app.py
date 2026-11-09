@@ -28,7 +28,7 @@ from src.landmarks import N_POINTS, LipTracker, draw_lips, mouth_aspect_ratio
 from src.llm_corrector import LLMCorrector
 from src.recognizer import load_recognizer
 from src.speaker import Speaker
-from src.utils import FPSCounter, draw_text, load_env, load_phrases, open_camera, wrap_text
+from src.utils import FPSCounter, draw_text, load_env, load_phrases, make_window, open_camera, wrap_text
 
 WINDOW = "SilentSpeech"
 W, H = 1280, 640
@@ -361,8 +361,7 @@ class App:
         cap = open_camera(self.args.camera)
         if cap is None:
             sys.exit("Could not open the webcam. Try --camera 1, close Zoom/Teams, or run python check_setup.py.")
-        cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        cv2.resizeWindow(WINDOW, W, H)
+        make_window(WINDOW, W, H)
         failures = 0
         try:
             with LipTracker() as tracker:

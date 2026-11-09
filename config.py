@@ -6,6 +6,10 @@ Change behaviour here instead of editing code. Secrets (API keys) belong in
 import os
 from pathlib import Path
 
+# Hide MediaPipe/TensorFlow Lite start-up chatter (it looks like errors but isn't).
+os.environ.setdefault("GLOG_minloglevel", "2")
+os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
 ROOT = Path(__file__).resolve().parent
 
 # Everything the project writes (data, models, audio, results) lives under
