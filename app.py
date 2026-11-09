@@ -14,6 +14,7 @@ Keys
     BACKSPACE  remove the last phrase          C  clear the sentence
     M          push-to-talk <-> auto mode      L  LLM layer on/off
     A          acknowledge an emergency alert  Q  quit
+    F          focus: switch to your most reliable phrases (higher accuracy) and back
 """
 import argparse
 import sys
@@ -93,6 +94,11 @@ class App:
         self.sentence = []
         self.history = deque(maxlen=config.LLM_CONTEXT_PHRASES)
         self.fps = FPSCounter()
+
+        # focus mode (F): only the speaker's most reliable phrases
+        self.full_runtime = self.runtime
+        self.focus = None
+        self._ranking = None
 
         # learning from the user's 1/2/3 choices
         self.last_clip = None
@@ -228,12 +234,33 @@ class App:
                     return
                 self._learn_again = False
             try:
-                m = for_speaker(self.args.speaker, self.runtime.label_map, rebuild=True)
-                if m is not None and m.label_map == self.runtime.label_map:
-                    self.runtime = m
-                    print(f"[learn] recogniser updated: {m.describe()}")
+                full = for_speaker(self.args.speaker, self.full_runtime.label_map, rebuild=True)
+                if full is not None and full.label_map == self.full_runtime.label_map:
+                    self.full_runtime, self._ranking = full, None
+                    self.runtime = full.restrict(self.focus) if self.focus else full
+                    print(f"[learn] recogniser updated: {self.runtime.describe()}")
             except Exception as e:
                 print(f"[learn] update failed: {e}")
+
+    # ------------------------------------------------------------------ focus
+    def toggle_focus(self, size=None):
+        """Switch between all phrases and the speaker's most reliable ones."""
+        if getattr(self.full_runtime, "kind", "") != "templates":
+            self.note = "Focus mode needs the instant templates (run start.py to calibrate)."
+            return
+        if self.focus and size is None:
+            self.focus, self.runtime = None, self.full_runtime
+            self.note = f"All {len(self.runtime.label_map)} phrases."
+            return
+        size = size or config.FOCUS_PHRASES
+        if self._ranking is None:
+            self._ranking = self.full_runtime.rank_phrases()
+        top = self._ranking[:max(2, min(size, len(self._ranking)))]
+        self.focus = [pid for pid, _ in top]
+        self.runtime = self.full_runtime.restrict(self.focus)
+        self.note = (f"Focus: your {len(self.focus)} most reliable phrases (about {top[-1][1]:.0%} accurate). "
+                     "F for all phrases.")
+        print(f"[focus] {', '.join(self.text(p) for p in self.focus)} - estimated {top[-1][1]:.0%}")
 
     # ----------------------------------------------------------------- input
     def pick(self, k, now):
@@ -293,6 +320,8 @@ class App:
                 self.note = "LLM unavailable: " + self.llm.unavailable_reason
         elif key in (ord("a"), ord("A")):
             self.alert = None
+        elif key in (ord("f"), ord("F")) and not self.capturing and not self.pending:
+            self.toggle_focus()
         return True
 
     # --------------------------------------------------------- per-frame step
@@ -408,13 +437,13 @@ class App:
 
         draw_text(canvas, "SPACE capture  1/2/3 pick  ENTER speak  BKSP undo  C clear",
                   (PX, VY + VH - 26), 0.45, DIM, 1)
-        draw_text(canvas, "M mode  L LLM  A acknowledge alert  Q quit", (PX, VY + VH - 6), 0.45, DIM, 1)
+        draw_text(canvas, "F focus  M mode  L LLM  A acknowledge alert  Q quit", (PX, VY + VH - 6), 0.45, DIM, 1)
 
         # status bar
         cv2.rectangle(canvas, (0, H - 36), (W, H), (48, 44, 42), -1)
         llm = f"ON ({self.llm.provider})" if self.llm_on else "OFF"
         lat = self.speaker.last_latency_ms
-        rec = "-" if self.runtime is None else self.runtime.kind
+        rec = "-" if self.runtime is None else self.runtime.kind + (f" (focus {len(self.focus)})" if self.focus else "")
         status = (f"Mode: {'PUSH-TO-TALK' if self.mode == 'ptt' else 'AUTO'}   FPS {self.fps.fps:4.1f}   "
                   f"Recogniser: {rec}   LLM: {llm}   Speaker: {self.args.speaker}   "
                   f"Latency: {'-' if lat is None else f'{lat:.0f} ms'}   MAR {mar:.2f}  motion {motion:.3f}")
@@ -469,7 +498,13 @@ def main(argv=None):
     ap.add_argument("--model", help="use this model file instead of the speaker's or the base model")
     ap.add_argument("--recognizer", choices=["auto", "neural", "templates"], default="auto",
                     help="auto: enrolled/trained neural model if it knows this speaker, else calibration templates")
-    App(ap.parse_args(argv)).run()
+    ap.add_argument("--focus", type=int, metavar="N",
+                    help="start with only your N most reliable phrases (press F in the app to switch)")
+    args = ap.parse_args(argv)
+    app = App(args)
+    if args.focus:
+        app.toggle_focus(args.focus)
+    app.run()
 
 
 if __name__ == "__main__":

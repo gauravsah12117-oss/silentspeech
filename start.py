@@ -26,6 +26,7 @@ import config
 from src.utils import load_env, load_phrases
 
 CAL_SESSION = 1
+TRAIN_SESSION = 2      # extra examples from --train-more
 _LOG = None   # session log file (everything shown in the window, plus the answers)
 
 
@@ -207,11 +208,39 @@ def step_voice(speaker, phrase_ids, phrases):
             print(f"\n  (skipped: {e})")
 
 
+def train_more(args, speaker, all_phrases):
+    """Record more examples of every calibrated phrase and show the gain."""
+    from collect_data import existing_reps
+    counts = clip_counts(speaker, list(all_phrases))
+    phrases = {pid: all_phrases[pid] for pid in all_phrases if counts[pid] >= 2}
+    if len(phrases) < 2:
+        sys.exit(f"\n{speaker} has no calibration yet. Run start.bat first.")
+    print(f"\n=== Train more: {len(phrases)} phrases ===")
+    before = build_templates(speaker, list(phrases)).report.get("loo_accuracy") or 0.0
+    print(f"Right now your clips are recognised {before:.0%} of the time "
+          f"({min(counts[p] for p in phrases)}-{max(counts[p] for p in phrases)} examples per phrase).")
+    print("More examples is what makes it more accurate. Mouth each phrase clearly, the same way every time.")
+    done = {pid: len(existing_reps(speaker, pid, TRAIN_SESSION)) for pid in phrases}
+    record(speaker, TRAIN_SESSION, max(done.values()) + config.TRAIN_MORE_REPS, phrases, args.camera, "Training")
+    m = build_templates(speaker, list(phrases))
+    report(m, all_phrases)
+    after = m.report.get("loo_accuracy") or 0.0
+    print(f"\nAccuracy on your clips: {before:.0%} before -> {after:.0%} now.")
+    ranking = m.rank_phrases()
+    n = min(config.FOCUS_PHRASES, len(ranking))
+    print(f"Your {n} most reliable phrases (about {ranking[n - 1][1]:.0%} accurate together): "
+          + ", ".join(f"\"{all_phrases[p]['text']}\"" for p, _ in ranking[:n]))
+    print("In the live app, press F to use only those (and F again for all phrases).")
+    return m
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--speaker", help="short ID for the person using it, e.g. s01")
     ap.add_argument("--camera", type=int, default=None)
     ap.add_argument("--recalibrate", action="store_true", help="record another round of calibration clips")
+    ap.add_argument("--train-more", action="store_true",
+                    help=f"record {config.TRAIN_MORE_REPS} more examples of every phrase to raise accuracy")
     ap.add_argument("--skip-check", action="store_true")
     args = ap.parse_args(argv)
     load_env()
@@ -223,6 +252,12 @@ def main(argv=None):
 
     if not args.skip_check:
         step_check(args.camera)
+
+    if args.train_more:
+        train_more(args, speaker, all_phrases)
+        if yes("\nOpen the live app now?", True):
+            launch_app(speaker, args.camera)
+        return
 
     # --- Step 2: calibration ------------------------------------------------
     heading(2, "calibration")
@@ -248,7 +283,8 @@ def main(argv=None):
     m = build_templates(speaker, list(phrases))
     weak = report(m, all_phrases)
     if weak and yes(f"Record 2 more clips of the {len(weak)} weakest phrase(s)? It usually helps.", recorded_now):
-        extra = max(counts[pid] for pid in weak) + 2
+        from collect_data import existing_reps
+        extra = max(len(existing_reps(speaker, pid, CAL_SESSION)) for pid in weak) + 2
         record(speaker, CAL_SESSION, extra, {pid: all_phrases[pid] for pid in weak}, args.camera, "Extra clips")
         m = build_templates(speaker, list(phrases))
         report(m, all_phrases)
@@ -262,13 +298,18 @@ def main(argv=None):
     if not llm.available:
         print("(Optional) For context-aware correction, put an API key in .env - see README section 17.")
     llm.close()
-    print("In the app: press SPACE, then silently mouth a phrase within 2.5 seconds.")
-    print("1/2/3 pick an option when it is unsure, ENTER speaks the whole sentence, Q quits.")
     wait_enter("Press Enter to start...")
+    launch_app(speaker, args.camera)
+
+
+def launch_app(speaker, camera):
+    print("In the app: press SPACE, then silently mouth a phrase within 2.5 seconds.")
+    print("1/2/3 pick, correct or confirm a phrase (it learns from that), F focuses on your")
+    print("most reliable phrases, ENTER speaks the whole sentence, Q quits.")
     from app import App
-    App(argparse.Namespace(mode="ptt", voice="cloned", no_llm=False, speaker=speaker, camera=args.camera,
+    App(argparse.Namespace(mode="ptt", voice="cloned", no_llm=False, speaker=speaker, camera=camera,
                            model=None, recognizer="auto")).run()
-    print("\nThe live app is closed. Run start.bat again any time.")
+    print("\nThe live app is closed. app.bat opens it again; train_more.bat makes it more accurate.")
 
 
 if __name__ == "__main__":

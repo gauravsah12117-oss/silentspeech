@@ -113,6 +113,8 @@ AUGMENT = {
 QUICKSTART_PHRASES = ["P01", "P09", "P10", "P12", "P16", "P17", "P22", "P23", "P28", "P30"]
 QUICKSTART_REPS = 4           # calibration clips per phrase (instant templates need 3+)
 QUICKSTART_COUNTDOWN = 2      # seconds of 3-2-1 before each calibration clip
+FOCUS_PHRASES = 6             # F in the live app: use only this many of your most reliable phrases
+TRAIN_MORE_REPS = 4           # start.py --train-more: extra clips of every phrase per round
 LEARN_FROM_CHOICES = True     # keep live clips the user confirms with 1/2/3 as new examples
 LEARN_SESSION = 9             # session number for those learned clips (data/raw/<speaker>/<id>/9_xx.npy)
 

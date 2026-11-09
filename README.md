@@ -26,7 +26,15 @@ The first run installs everything (about 1 GB). Then a guided setup:
 4. **Voice:** say each phrase once to use your own voice, or use the computer voice.
 5. **Live app:** press SPACE, mouth a phrase, and hear it.
 
-No training is needed: the *instant templates* recogniser compares what you mouth with your own calibration clips (section 6.7). It also learns while you use it: whenever you pick or confirm a phrase with 1/2/3, that clip becomes a new example. For the competition dataset and the neural model, follow sections 13–15. Run `start.py` again any time; finished steps are skipped. To go straight to the live app, double-click `app.bat`.
+No training is needed: the *instant templates* recogniser compares what you mouth with your own calibration clips (section 6.7). For the competition dataset and the neural model, follow sections 13–15. Run `start.py` again any time; finished steps are skipped.
+
+| Double-click | What it does |
+|---|---|
+| `start.bat` | First-time setup and calibration (above) |
+| `app.bat` | Open the live app straight away |
+| `train_more.bat` | Record 4 more examples of every phrase (about 4 minutes), then show accuracy before and after. **The most effective way to make it more accurate.** |
+
+**Getting more accuracy:** more examples per phrase help the most. On the first real calibration, accuracy rose from 47% with 1 example per phrase to 60% with 2 and 67% with 3. The app also learns while you use it: whenever you pick, correct or confirm a phrase with 1/2/3, that clip becomes a new example. Finally, **F** in the live app switches to your most reliable phrases. With fewer, more distinct phrases accuracy is much higher: on that first calibration, 6 phrases scored about 96% against 75% for all 10.
 
 ---
 
@@ -226,7 +234,7 @@ These thresholds are starting values and are tuned on the validation set (see [s
 
 The neural model needs hundreds of clips and a long training run (hours on a low-power laptop). For a new user, or when there is no time to train, SilentSpeech uses **nearest-neighbour matching with dynamic time warping (DTW)**:
 
-1. Each calibration clip is reduced to a *signature*: still frames before and after the phrase are cut off, and every frame is stored as its change from the resting mouth shape, resampled to 32 frames.
+1. Each calibration clip is reduced to a *signature*: the clip is resampled to 32 frames, its average mouth shape is subtracted (so it describes how the shape *changes*), and the smoothed speed of every point is added. On the first real calibration this scored 75% leave-one-out, against 35% for an earlier version that measured change from the "resting" lips at the start and end. Real users are often still moving at both ends. Clips where the lips barely moved, or that look unlike every other example of their phrase, are left out automatically.
 2. A new clip is compared with every stored signature. DTW lines the two up in time, so speaking faster or slower doesn't matter.
 3. The phrase whose examples are closest wins. Confidence comes from how clearly it beats the runner-up, relative to the distance, so a whole-session shift (new day, new light) doesn't destroy it.
 4. **Calibration:** each calibration clip is recognised from all the others (leave-one-out). That gives an accuracy estimate and sets the confidence scale so that average confidence equals measured accuracy. A clip far from every phrase (talking, laughing, a phrase not in the list) gets low confidence and is never spoken directly.
@@ -742,6 +750,7 @@ The app picks the recogniser automatically: the neural model if it was trained o
 | M | Switch between push-to-talk and auto mode |
 | L | Turn the LLM layer on or off |
 | A | Acknowledge an emergency alert |
+| F | Focus: use only your most reliable phrases (higher accuracy); F again for all phrases |
 | Q | Quit |
 
 If no model has been trained yet, the app still opens in tracking-only mode, which is handy for checking the camera and lighting.
@@ -890,7 +899,7 @@ Being open about these limits in the presentation shows maturity and builds trus
 | `cv2` import errors or missing functions | Both `opencv-python` and `opencv-contrib-python` installed | `pip uninstall -y opencv-python opencv-contrib-python` then `pip install opencv-contrib-python` |
 | Face not detected | Poor lighting or position | Face a light source, sit 40–70 cm away, and look straight at the camera |
 | `check_setup.py` says the picture is very dark | Dim room, light behind you, or the camera's privacy shutter is closed | Put a lamp in front of you and open the shutter; the app also shows "Too dark" |
-| The app often says "please repeat" | Calibration clips differ from how you mouth now | Run `python start.py --recalibrate` in the same light you'll demo in, and mouth clearly |
+| The app often says "please repeat" | Too few examples, or calibration clips differ from how you mouth now | Run `train_more.bat` in the same light you'll demo in, and mouth each phrase the same way every time. Press 1/2/3 to confirm phrases while using it, and use F for a demo. |
 | Every clip is rejected as "camera too slow" | Webcam drops to 15 FPS in dim light | Add light in front of you, close other apps, plug in the charger |
 | Very low accuracy | Look-alike phrases, unbalanced data, or random splitting | Check the confusion matrix, rename confused phrases, balance clip counts, split by session |
 | Good test accuracy, poor live accuracy | Live conditions differ from recordings | Record an extra session in the demo venue's lighting, or run a quick enrolment there |

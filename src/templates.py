@@ -32,7 +32,8 @@ BAND = 8               # DTW warping window (frames)
 TAU_MIN = 0.15         # softest allowed confidence temperature (relative margin units)
 REJECT_FACTOR = 2.0    # "none of these" beyond 2x the typical distance between phrases
 OUTLIER_FACTOR = 2.0   # a clip this much farther from its own phrase than usual is left out
-VERSION = 4            # bump to invalidate caches when the signature or scoring changes
+VELOCITY_WEIGHT = 2.0  # how much the speed of the lips counts next to their shape
+VERSION = 5            # bump to invalidate caches when the signature or scoring changes
 
 
 # --- Signatures ----------------------------------------------------------------
@@ -51,19 +52,27 @@ def active_fraction(pos, frac=0.15):
 
 
 def signature(positions):
-    """Normalised positions (T, 40, 2) -> (features (32, 80), duration fraction).
+    """Normalised positions (T, 40, 2) -> (features (32, 160), duration fraction).
 
     The whole clip is resampled to 32 frames and the clip's average mouth
-    shape is subtracted, so the signature describes how the shape changes.
+    shape is subtracted, so the signature describes how the shape changes;
+    the frame-to-frame speed of every point is added (weight VELOCITY_WEIGHT).
     Real users are often already moving their lips when recording starts and
     still moving when it stops, so nothing here assumes a resting mouth at
-    either end. (Tested on real calibration clips: 62% leave-one-out
-    accuracy versus 35% for a version that measured change from the "rest"
-    frames at the ends.)
+    either end.
+
+    Measured on the first real calibration (50 clips, 10 phrases, leave-one-
+    out): change from "rest" frames 35%, shape only 66%, shape + speed 70%.
+    Learned whitening/LDA transforms did worse (16-52%): too few clips.
     """
     feats = resample(positions, N_FRAMES).reshape(N_FRAMES, -1)
     feats = feats - feats.mean(0)
-    return feats.astype(np.float32), active_fraction(positions)
+    # Speed is measured on a lightly smoothed copy: differencing raw frames
+    # magnifies landmark jitter (dim light), which hurt clips from another day.
+    padded = np.pad(feats, ((1, 1), (0, 0)), mode="edge")
+    smooth = (padded[:-2] + padded[1:-1] + padded[2:]) / 3
+    speed = np.diff(smooth, axis=0, prepend=smooth[:1]) * VELOCITY_WEIGHT
+    return np.concatenate([feats, speed], 1).astype(np.float32), active_fraction(positions)
 
 
 def raw_signature(clip):
@@ -183,6 +192,48 @@ class TemplateMatcher:
                 kept.remove(i)
                 dropped.append((names[i], "looks unlike the other clips of this phrase"))
         return kept, dropped
+
+    def restrict(self, phrase_ids, progress=None):
+        """A matcher that only knows these phrases (re-calibrated on their clips)."""
+        keep_ids = [pid for pid in self.label_map if pid in set(phrase_ids)]
+        old = {pid: i for i, pid in enumerate(self.label_map)}
+        mask = np.isin(self.labels, [old[pid] for pid in keep_ids])
+        new = {old[pid]: j for j, pid in enumerate(keep_ids)}
+        m = TemplateMatcher(self.feats[mask], self.durs[mask], [new[c] for c in self.labels[mask]], keep_ids,
+                            self.params, name=f"{self.name}_focus{len(keep_ids)}")
+        m.calibrate(progress=progress)
+        return m
+
+    def rank_phrases(self):
+        """Phrases from most to least reliable, with the estimated accuracy of each top-n set.
+
+        Greedy: repeatedly drop the phrase whose removal helps leave-one-out
+        accuracy most. Returns [(phrase_id, accuracy of the set up to it)].
+        """
+        n = len(self.feats)
+        dist = np.stack([dtw_distances(self.feats[i], self.feats) for i in range(n)])
+        np.fill_diagonal(dist, np.inf)
+
+        def accuracy(classes):
+            idx = [i for i in range(n) if self.labels[i] in classes
+                   and np.sum(self.labels == self.labels[i]) >= 2]
+            if not idx:
+                return 1.0
+            hits = 0
+            for i in idx:
+                scores = {c: dist[i, self.labels == c].min() for c in classes}
+                hits += min(scores, key=scores.get) == self.labels[i]
+            return hits / len(idx)
+
+        current = list(range(len(self.label_map)))
+        removed = []
+        while len(current) > 2:
+            drop = max(current, key=lambda c: accuracy([x for x in current if x != c]))
+            removed.append((drop, accuracy(current)))
+            current = [x for x in current if x != drop]
+        ranking = [(self.label_map[c], accuracy(current[:i + 1])) for i, c in enumerate(current)]
+        ranking += [(self.label_map[c], acc) for c, acc in reversed(removed)]
+        return ranking
 
     def _distances(self, feat, dur):
         d = dtw_distances(feat, self.feats)

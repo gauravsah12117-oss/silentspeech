@@ -53,16 +53,16 @@ class TestTemplates(unittest.TestCase):
         self.assertGreater(probs.max(1).mean(), 0.6)     # confident enough to be spoken
 
     def test_unknown_phrase_is_not_more_confident_than_known(self):
-        # Separation depends on how consistent the clips are. On the first real
-        # calibration (2026-11-10) unknown phrases averaged 0.40 confidence vs
-        # 0.47 for known ones; this guards against a regression where unknown
-        # phrases start to look *more* certain than real ones.
-        m = TemplateMatcher.from_clips([c for c in self.clips if c.session == 1 and c.phrase_id != "P05"],
-                                       PIDS[:4])
+        # Same recording conditions for known and unknown queries, so only
+        # "is it in the list?" differs. On the real calibration (2026-11-10)
+        # unknown phrases averaged 0.37 confidence vs 0.49 for known ones; this
+        # guards against unknown phrases looking *more* certain than real ones.
+        refs = [c for c in self.clips if c.session == 1 and c.phrase_id != "P05" and c.rep <= 2]
+        m = TemplateMatcher.from_clips(refs, PIDS[:4])
         known = [m.predict_clip(np.load(c.path))[0].max() for c in self.clips
-                 if c.session == 3 and c.phrase_id != "P05"]
+                 if c.session == 1 and c.phrase_id != "P05" and c.rep == 3]
         unknown = [m.predict_clip(np.load(c.path))[0].max() for c in self.clips
-                   if c.session == 3 and c.phrase_id == "P05"]
+                   if c.session == 1 and c.phrase_id == "P05"]
         self.assertLessEqual(np.mean(unknown), np.mean(known) + 0.05)
 
     def test_bad_clips_are_left_out(self):
