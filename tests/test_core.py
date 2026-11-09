@@ -138,6 +138,20 @@ class TestDecision(unittest.TestCase):
         self.assertEqual(decide([0.5, 0.3, 0.2], self.labels, self.phrases).action, "llm")
         self.assertEqual(decide([0.35, 0.33, 0.32], self.labels, self.phrases).action, "repeat")
 
+    def test_repeated_tries_add_up(self):
+        from src.decision import combine_attempts
+        labels = ["P01", "P12", "P22", "P28"]
+        first = np.array([0.36, 0.12, 0.23, 0.08])        # unsure; the rest is "none of these"
+        second = np.array([0.34, 0.21, 0.13, 0.07])
+        self.assertEqual(decide(first, labels, self.phrases).action, "repeat")
+        both = combine_attempts(first, second)
+        self.assertEqual(int(np.argmax(both)), 0)
+        self.assertGreater(both[0], max(first[0], second[0]))   # agreement makes it surer
+        self.assertNotEqual(decide(both, labels, self.phrases).action, "repeat")
+        # tries that disagree cancel out instead of adding up
+        other = np.array([0.05, 0.05, 0.40, 0.30])
+        self.assertLess(combine_attempts(first, other).max(), 0.70)
+
     def test_emergency_alert_below_accept(self):
         d = decide([0.45, 0.48, 0.07], self.labels, self.phrases)   # P12 "I can't breathe"
         self.assertEqual(d.alert_phrase_id, "P12")

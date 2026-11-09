@@ -52,6 +52,7 @@ LANGUAGE = "en"               # XTTS-v2 language code used for the cloned voice
 CONF_ACCEPT = 0.70            # speak directly at or above this confidence
 CONF_MIN = 0.40               # below this, ask the user to repeat
 EMERGENCY_MIN = 0.40          # any emergency phrase at or above this raises an alert
+RETRY_COMBINE_SECONDS = 15    # after "not sure", a new try within this time adds up with the earlier one(s)
 
 # --- LLM correction layer --------------------------------------------------
 USE_LLM = True

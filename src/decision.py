@@ -29,6 +29,23 @@ class Decision:
         return self.candidates[0][1] if self.candidates else 0.0
 
 
+def combine_attempts(p_prev, p_new, floor=0.01):
+    """Evidence from repeated tries: multiply the probabilities and renormalise.
+
+    When the app says "not sure, please repeat", the next try should count
+    together with the first. Two tries that agree on a phrase make it more
+    likely; tries that disagree cancel out. Template probabilities may sum
+    to less than 1 (the rest means "none of these"); that mass is kept as its
+    own outcome so two "none of these" tries stay unsure. The floor stops one
+    near-zero score from vetoing a phrase outright.
+    """
+    p_prev, p_new = np.asarray(p_prev, float), np.asarray(p_new, float)
+    a = np.append(p_prev, max(0.0, 1.0 - p_prev.sum())) + floor
+    b = np.append(p_new, max(0.0, 1.0 - p_new.sum())) + floor
+    c = a * b
+    return (c / c.sum())[:-1]
+
+
 def top_k(probs, label_map, k=3):
     order = np.argsort(probs)[::-1][:k]
     return [(label_map[i], float(probs[i])) for i in order]

@@ -26,7 +26,7 @@ from collections import deque
 import numpy as np
 
 import config
-from src.decision import decide
+from src.decision import combine_attempts, decide, top_k
 from src.features import fill_missing, frame_motion, lip_motion, normalise, pad_to_length
 from src.dataset import blendshape_path
 from src.landmarks import (BLENDSHAPE_NAMES, N_POINTS, draw_face_hud, draw_lips, make_tracker,
@@ -101,6 +101,7 @@ class App:
 
         # conversation state
         self.decision = None
+        self.retry = None               # evidence from earlier "not sure" tries (they add up)
         self.options = None            # candidates waiting for 1/2/3
         self.pending = None            # LLM call in flight
         self.last_committed = None     # (phrase_id, candidates) for corrections
@@ -184,10 +185,20 @@ class App:
             self.note = "Face not visible enough - please repeat."
             return
         self.last_clip, self.last_blend, self.learned_path = clip, blend, None
-        d = decide(probs, self.runtime.label_map, self.phrases)
+        # "Not sure - please repeat": a quick repeat counts together with the earlier try (or tries)
+        tries, labels = 1, list(self.runtime.label_map)
+        r = self.retry
+        if r and now - r["time"] <= config.RETRY_COMBINE_SECONDS and r["labels"] == labels:
+            single = top_k(probs, labels, 1)[0]
+            probs, tries = combine_attempts(r["probs"], probs), r["tries"] + 1
+            print(f"[combine] try {tries}: this try alone {single[0]} {single[1]:.2f}; "
+                  f"together {top_k(probs, labels, 1)[0][0]} {probs.max():.2f}")
+        d = decide(probs, labels, self.phrases)
+        self.retry = {"probs": probs, "tries": tries, "time": now, "labels": labels} if d.action == "repeat" else None
         self.decision = d
         top = ", ".join(f"{pid} {p:.2f}" for pid, p in d.candidates)
         print(f"[{d.action}] {top}" + (f"  ALERT {d.alert_phrase_id}" if d.alert_phrase_id else ""))
+        together = f" (your {tries} tries together)" if tries > 1 else ""
 
         if d.alert_phrase_id:
             self.alert = d.alert_phrase_id
@@ -195,26 +206,28 @@ class App:
             self.speaker.alert()
             self.write_transcript(f"ALERT raised: {self.text(d.alert_phrase_id)}")
         if d.action == "accept":
-            self.commit(d.phrase_id, f"Spoke it (confidence {d.confidence:.0%}).", now, d.candidates,
+            self.commit(d.phrase_id, f"Spoke it (confidence {d.confidence:.0%}{together}).", now, d.candidates,
                         source="lips", confidence=d.confidence)
         elif d.action == "llm":
             if self.llm_on:
                 self.pending = {"future": self.llm.submit(d.candidates, list(self.history), self.phrases),
                                 "deadline": now + config.LLM_TIMEOUT_S, "t_ref": now, "decision": d}
                 self.options = d.candidates
-                self.note = f"Not fully sure - asking {self.llm.provider.title()} to use the conversation..."
+                self.note = f"Not fully sure{together} - asking {self.llm.provider.title()} to use the conversation..."
             else:
-                self.commit(d.candidates[0][0], f"Medium confidence ({d.confidence:.0%}) - spoke the top guess.",
-                            now, d.candidates, source="fallback", confidence=d.confidence)
+                self.commit(d.candidates[0][0], f"Medium confidence ({d.confidence:.0%}{together}) - spoke the "
+                            "top guess.", now, d.candidates, source="fallback", confidence=d.confidence)
         else:
             self.options = d.candidates
-            self.note = "Not sure, so nothing was spoken. Mouth it again, or press / click 1, 2 or 3."
+            self.note = ("Not sure, so nothing was spoken. Mouth it again (your tries add up), "
+                         "or press / click 1, 2 or 3.")
 
     def commit(self, pid, note, t_ref, candidates=None, source="lips", confidence=None):
         self.sentence.append(pid)
         self.history.append(pid)
         self.options = None
         self.pending = None
+        self.retry = None
         self.note = note
         self.last_committed = (pid, candidates or [])
         self.speaker.say([pid], t_ref)
@@ -378,6 +391,7 @@ class App:
         elif key in (ord("c"), ord("C")):
             self.sentence.clear()
             self.options = None
+            self.retry = None
             self.last_committed = None
             self.note = "Sentence cleared."
         elif key in (ord("m"), ord("M")):
