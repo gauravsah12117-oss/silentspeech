@@ -1,0 +1,19 @@
+# Personal data and secrets: never commit
+data/
+audio/
+.env
+models/*.pt
+models/experiments/
+
+# Python
+venv/
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
