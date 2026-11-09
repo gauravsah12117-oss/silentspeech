@@ -68,10 +68,12 @@ def start_session_log(prefix):
 
 # --- Phrases -----------------------------------------------------------------
 
-def load_phrases(path=None, phrase_set=None):
+def load_phrases(path=None, phrase_set=None, custom=True):
     """Return {phrase_id: phrase_dict} in file order.
 
     phrase_set "mvp" keeps entries marked "set": "mvp"; "full" keeps all.
+    The user's own phrases (add_phrase.py, ids C01, C02, ...) are always
+    included unless custom=False.
     """
     path = Path(path or config.PHRASE_FILE)
     phrase_set = phrase_set or config.PHRASE_SET
@@ -82,7 +84,27 @@ def load_phrases(path=None, phrase_set=None):
         raise ValueError(f"{path}: " + "; ".join(problems))
     if phrase_set not in ("mvp", "full"):
         raise ValueError(f"Unknown phrase set {phrase_set!r} (use 'mvp' or 'full')")
-    return {p["id"]: p for p in items if phrase_set == "full" or p.get("set", "mvp") == "mvp"}
+    phrases = {p["id"]: p for p in items if phrase_set == "full" or p.get("set", "mvp") == "mvp"}
+    if custom:
+        for p in load_custom_phrases():
+            phrases.setdefault(p["id"], p)
+    return phrases
+
+
+def load_custom_phrases():
+    """The user's own phrases, from phrases/custom.json (private, not in git)."""
+    path = config.CUSTOM_PHRASE_FILE
+    if not path.exists():
+        return []
+    try:
+        items = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [p for p in items if not validate_phrases([p])]
+
+
+def save_custom_phrases(items):
+    save_json(config.CUSTOM_PHRASE_FILE, items)
 
 
 def validate_phrases(items):
@@ -140,11 +162,29 @@ def close_window(name):
         pass
 
 
+def screen_work_area():
+    """(width, height) of the usable desktop (Windows), or None if unknown."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+        rect = wintypes.RECT()
+        ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0)   # SPI_GETWORKAREA
+        return rect.right - rect.left, rect.bottom - rect.top
+    except Exception:
+        return None
+
+
 def make_window(name, width, height):
-    """A resizable OpenCV window that opens on top of the console."""
+    """A resizable OpenCV window that opens on top of the console and fits the screen."""
     import cv2
 
-    cv2.namedWindow(name, cv2.WINDOW_NORMAL)
+    cv2.namedWindow(name, cv2.WINDOW_NORMAL | cv2.WINDOW_KEEPRATIO)
+    area = screen_work_area()
+    if area:
+        scale = min(1.0, (area[0] - 20) / width, (area[1] - 50) / height)   # leave room for the title bar
+        width, height = int(width * scale), int(height * scale)
     cv2.resizeWindow(name, width, height)
     try:
         cv2.setWindowProperty(name, cv2.WND_PROP_TOPMOST, 1)

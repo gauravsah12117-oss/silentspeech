@@ -33,9 +33,10 @@ BAND = 8               # DTW warping window (frames)
 TAU_MIN = 0.15         # softest allowed confidence temperature (relative margin units)
 REJECT_FACTOR = 2.0    # "none of these" beyond 2x the typical distance between phrases
 OUTLIER_FACTOR = 2.0   # a clip this much farther from its own phrase than usual is left out
-VELOCITY_WEIGHT = 2.0  # how much the speed of the lips counts next to their shape
+SPEED_WEIGHTS = (2.0, 5.0)   # how much lip *speed* counts next to lip *shape*; calibration picks per person
+DEFAULT_SPEED_WEIGHT = 5.0   # used before calibration (and for pruning)
 BLEND_WEIGHTS = (0.0, 0.5, 1.0, 2.0)   # muscle-score weights tried at calibration (0 = not used)
-VERSION = 6            # bump to invalidate caches when the signature or scoring changes
+VERSION = 7            # bump to invalidate caches when the signature or scoring changes
 
 
 # --- Signatures ----------------------------------------------------------------
@@ -57,14 +58,16 @@ def signature(positions):
     """Normalised positions (T, 40, 2) -> (features (32, 160), duration fraction).
 
     The whole clip is resampled to 32 frames and the clip's average mouth
-    shape is subtracted, so the signature describes how the shape changes;
-    the frame-to-frame speed of every point is added (weight VELOCITY_WEIGHT).
-    Real users are often already moving their lips when recording starts and
-    still moving when it stops, so nothing here assumes a resting mouth at
-    either end.
+    shape is subtracted, so the first 80 columns describe how the shape
+    changes; the last 80 are the frame-to-frame speed of every point (stored
+    unweighted; the matcher applies the speed weight). Real users are often
+    already moving their lips when recording starts and still moving when it
+    stops, so nothing here assumes a resting mouth at either end.
 
-    Measured on the first real calibration (50 clips, 10 phrases, leave-one-
-    out): change from "rest" frames 35%, shape only 66%, shape + speed 70%.
+    Measured on real calibrations (leave-one-out): change from "rest" frames
+    35%; shape only 66%; shape + speed x2 70% (50 clips, one sitting). With
+    clips from two lighting conditions (58 clips): speed x2 59%, x3-x10
+    66-69%. Movement survives a change of light better than shape does.
     Learned whitening/LDA transforms did worse (16-52%): too few clips.
     """
     feats = resample(positions, N_FRAMES).reshape(N_FRAMES, -1)
@@ -73,8 +76,16 @@ def signature(positions):
     # magnifies landmark jitter (dim light), which hurt clips from another day.
     padded = np.pad(feats, ((1, 1), (0, 0)), mode="edge")
     smooth = (padded[:-2] + padded[1:-1] + padded[2:]) / 3
-    speed = np.diff(smooth, axis=0, prepend=smooth[:1]) * VELOCITY_WEIGHT
+    speed = np.diff(smooth, axis=0, prepend=smooth[:1])
     return np.concatenate([feats, speed], 1).astype(np.float32), active_fraction(positions)
+
+
+def weight_speed(feats, speed_weight):
+    """Scale the speed half of signature(s) (..., 160)."""
+    half = feats.shape[-1] // 2
+    out = feats.copy()
+    out[..., half:] *= speed_weight
+    return out
 
 
 def raw_signature(clip):
@@ -136,7 +147,7 @@ class TemplateMatcher:
         self.durs = np.asarray(durs, np.float32)
         self.labels = np.asarray(labels, np.int64)
         self.label_map = list(label_map)
-        self.params = {"blend_weight": 0.0, **dict(params)}
+        self.params = {"blend_weight": 0.0, "speed_weight": DEFAULT_SPEED_WEIGHT, **dict(params)}
         self.report = report or {}
         self.name = name
         self.bsfeats = None if bsfeats is None else np.asarray(bsfeats, np.float32)   # (N, 32, 28) or None
@@ -144,12 +155,14 @@ class TemplateMatcher:
     def _uses_blend(self):
         return self.bsfeats is not None and self.params.get("blend_weight", 0) > 0
 
-    def _template_feats(self, blend_weight=None):
-        """Template signatures, with the muscle scores appended when they are used."""
+    def _template_feats(self, blend_weight=None, speed_weight=None):
+        """Template signatures with the speed weight applied and the muscle scores appended when used."""
         w = self.params.get("blend_weight", 0) if blend_weight is None else blend_weight
+        sw = self.params.get("speed_weight", DEFAULT_SPEED_WEIGHT) if speed_weight is None else speed_weight
+        base = weight_speed(self.feats, sw)
         if self.bsfeats is None or w <= 0:
-            return self.feats
-        return np.concatenate([self.feats, w * self.bsfeats], axis=2)
+            return base
+        return np.concatenate([base, w * self.bsfeats], axis=2)
 
     # -- building -----------------------------------------------------------
 
@@ -209,7 +222,7 @@ class TemplateMatcher:
                 dropped.append((names[i], "lips barely moved"))
         if len(kept) < 3:
             return kept, dropped
-        feats = np.stack([sigs[i][0] for i in kept])
+        feats = weight_speed(np.stack([sigs[i][0] for i in kept]), DEFAULT_SPEED_WEIGHT)
         own = []
         for a, i in enumerate(kept):
             d = dtw_distances(feats[a], feats)
@@ -270,11 +283,12 @@ class TemplateMatcher:
         return ranking
 
     def _distances(self, feat, dur, bsfeat=None):
+        q = weight_speed(feat, self.params.get("speed_weight", DEFAULT_SPEED_WEIGHT))
         if self._uses_blend() and bsfeat is not None:
             w = self.params["blend_weight"]
-            d = dtw_distances(np.concatenate([feat, w * bsfeat], axis=1), self._template_feats())
-        else:                      # no muscle scores for this clip: compare lip shapes only
-            d = dtw_distances(feat, self.feats)
+            d = dtw_distances(np.concatenate([q, w * bsfeat], axis=1), self._template_feats())
+        else:                      # no muscle scores for this clip: compare lip movement only
+            d = dtw_distances(q, self._template_feats(blend_weight=0))
         if self.params["dur_weight"]:
             d = d + self.params["dur_weight"] * np.abs(np.log(max(dur, 1e-3) / np.maximum(self.durs, 1e-3)))
         return d
@@ -294,13 +308,15 @@ class TemplateMatcher:
         truth = self.labels[queries]
         dur_rows = np.array([np.abs(np.log(max(self.durs[i], 1e-3) / np.maximum(self.durs, 1e-3)))
                              for i in queries])
-        # Muscle scores (when every clip has them) are tried at several weights;
-        # the weight that recognises this person's own clips best wins (0 = unused).
+        # How much lip speed counts, and how much the muscle scores count (when
+        # every clip has them), are both tried at a few values; whatever
+        # recognises this person's own clips best wins.
         blend_weights = BLEND_WEIGHTS if self.bsfeats is not None else (0.0,)
-        t0, done, total = time.time(), 0, len(queries) * len(blend_weights)
+        combos = [(sw, bw) for sw in SPEED_WEIGHTS for bw in blend_weights]
+        t0, done, total = time.time(), 0, len(queries) * len(combos)
         best, accuracy_by_weight = None, {}
-        for bw in blend_weights:
-            feats = self._template_feats(bw)
+        for sw, bw in combos:
+            feats = self._template_feats(bw, sw)
             dtw_rows = []
             for i in queries:
                 row = dtw_distances(feats[i], feats)
@@ -317,10 +333,15 @@ class TemplateMatcher:
                     scores = np.array([_class_scores(d, self.labels, n_cls, k) for d in dist])
                     acc = float((scores.argmin(1) == truth).mean())
                     accuracy_by_weight[bw] = max(acc, accuracy_by_weight.get(bw, 0.0))
-                    if best is None or acc > best[0] + 1e-9:
-                        best = (acc, k, lam * scale, scores, bw)
-        acc, k, w, scores, bw = best
+                    # Highest accuracy wins. On a tie: the stronger speed weight (it copes
+                    # better with a change of light, measured on real clips), then the
+                    # simpler settings (no muscle scores, k=1, no duration cue).
+                    key = (round(acc, 9), sw, -bw, -k, -lam)
+                    if best is None or key > best[0]:
+                        best = (key, k, lam * scale, scores, bw, sw)
+        (acc, *_), k, w, scores, bw, sw = best
         self.params["blend_weight"] = float(bw)
+        self.params["speed_weight"] = float(sw)
         rows = np.arange(len(truth))
         true_scores = scores[rows, truth]
         floor = 0.25 * float(np.median(true_scores[np.isfinite(true_scores)]))
@@ -356,7 +377,7 @@ class TemplateMatcher:
         tau = max(tau, TAU_MIN)
 
         self.params = {"T": tau, "k": int(k), "dur_weight": float(w), "reject": reject, "floor": floor,
-                       "blend_weight": float(bw)}
+                       "blend_weight": float(bw), "speed_weight": float(sw)}
         pred = scores.argmin(1)
         per_phrase, confusions = {}, {}
         for c, pid in enumerate(self.label_map):

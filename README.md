@@ -33,6 +33,7 @@ No training is needed: the *instant templates* recogniser compares what you mout
 | `start.bat` | First-time setup and calibration (above) |
 | `app.bat` | Open the live app straight away |
 | `train_more.bat` | Record 4 more examples of every phrase (about 4 minutes), then show accuracy before and after. **The most effective way to make it more accurate.** |
+| `add_phrase.bat` | Add **your own phrase**, any words in any language ("Turn on the news", "राम लाई बोलाउनुहोस्"), and teach it in about a minute |
 
 **Getting more accuracy:** more examples per phrase help the most. On the first real calibration, accuracy rose from 47% with 1 example per phrase to 60% with 2 and 67% with 3. The app also learns while you use it: whenever you pick, correct or confirm a phrase with 1/2/3, that clip becomes a new example. Finally, **F** in the live app switches to your most reliable phrases. With fewer, more distinct phrases accuracy is much higher: on that first calibration, 6 phrases scored about 96% against 75% for all 10.
 
@@ -109,6 +110,11 @@ Everything runs on a normal laptop CPU. No special sensors, no GPU, no cost.
 | **Emergency alert** | Critical phrases such as "I can't breathe" trigger an on-screen and sound alert for caregivers. |
 | **Quick personalisation** | A new user can enrol in about 10 minutes. |
 | **Works without training** | After 4 clips per phrase, an instant recogniser is ready in seconds on any laptop. |
+| **Your own phrases** | Add any phrase in any language (`add_phrase.bat`); it is recognised, spoken and shown on the board like the built-in ones. |
+| **Tap to speak** | Click any phrase tile (or one of the 1/2/3 options) when lip reading isn't possible. |
+| **Learns while you use it** | Every phrase picked, corrected or confirmed with 1/2/3 becomes a new example. |
+| **Conversation record** | Everything said is written with the time to `logs/conversation-<date>.txt` for caregivers (can be turned off). |
+| **Alerts that don't get lost** | An emergency alert repeats every 20 seconds until someone acknowledges it. |
 | **Privacy by design** | Stores only lip coordinates, never raw video. Can run fully offline. |
 | **Multilingual-ready** | The phrase set can be recorded in any language, including Indian languages. |
 
@@ -238,6 +244,7 @@ These thresholds are starting values and are tuned on the validation set (see [s
 The neural model needs hundreds of clips and a long training run (hours on a low-power laptop). For a new user, or when there is no time to train, SilentSpeech uses **nearest-neighbour matching with dynamic time warping (DTW)**:
 
 1. Each calibration clip is reduced to a *signature*: the clip is resampled to 32 frames, its average mouth shape is subtracted (so it describes how the shape *changes*), and the smoothed speed of every point is added. On the first real calibration this scored 75% leave-one-out, against 35% for an earlier version that measured change from the "resting" lips at the start and end. Real users are often still moving at both ends. Clips where the lips barely moved, or that look unlike every other example of their phrase, are left out automatically.
+   How much lip *speed* counts next to lip *shape* is chosen per person at calibration (×2 or ×5). With clips from two lighting conditions, the stronger weight lifted accuracy from 59% to 66–69%: movement survives a change of light better than shape does.
 2. A new clip is compared with every stored signature. DTW lines the two up in time, so speaking faster or slower doesn't matter.
 3. The phrase whose examples are closest wins. Confidence comes from how clearly it beats the runner-up, relative to the distance, so a whole-session shift (new day, new light) doesn't destroy it.
 4. **Facial muscle scores:** when clips have the 52 blendshapes, the mouth and jaw scores can be added to each frame. Calibration tries several weights (0, 0.5, 1, 2) on that person's own clips and keeps the most accurate, so they are used only if they help. Clips recorded before the Face Landmarker have no scores; once every phrase has 3 or more newer clips, the recogniser built from those (with scores) is compared with the one built from all clips (without), and the better one is kept.
@@ -278,6 +285,8 @@ silentspeech/
 ├── .gitignore                # excludes data/, audio/, .env, models/*.pt
 ├── start.bat / start.sh      # double-click: install (first time) and run start.py
 ├── start.py                  # guided quick start: check, calibrate, voice, live app
+├── add_phrase.py / .bat      # add your own phrase (any language) and teach it
+├── app.bat / train_more.bat  # open the live app / record more examples
 ├── config.py                 # all settings in one place
 ├── check_setup.py            # verifies webcam, libraries and audio
 ├── collect_data.py           # records lip-landmark clips for each phrase
@@ -296,6 +305,7 @@ silentspeech/
 │   ├── model.py
 │   ├── templates.py
 │   ├── recognizer.py
+│   ├── ui.py                 # fonts, cards, mouth close-up, muscle bars for the live app
 │   ├── decision.py
 │   ├── metrics.py
 │   ├── llm_corrector.py
@@ -308,6 +318,7 @@ silentspeech/
 ├── tests/                          # python -m unittest discover -s tests
 │   ├── test_core.py
 │   ├── test_templates.py
+│   ├── test_ui.py                  # live screen, custom phrases, transcript
 │   └── test_llm_http.py            # LLM layer against a local mock server
 ├── data/
 │   ├── raw/<speaker>/<phrase_id>/<session>_<rep>.npy
@@ -519,6 +530,8 @@ Phrases P01–P30 form the **MVP set**. P31–P50 extend it to the **full set**.
   {"id": "P12", "text": "I can't breathe", "category": "medical", "emergency": true, "set": "mvp"}
 ]
 ```
+
+**Your own phrases:** `add_phrase.bat` (or `python add_phrase.py "Turn on the news"`) adds a phrase in any language and records 4 calibration clips plus, optionally, your voice saying it. Custom phrases get IDs C01, C02... in `phrases/custom.json`, which stays private (not in git), and join every phrase set. `--emergency` makes one raise the caregiver alert; `--list` and `--remove C01` manage them. For phrases in Hindi or Nepali, record your own voice, since the offline computer voice only speaks English.
 
 To add a regional language, create a new file such as `phrases/phrases_hi.json` with the same IDs, record new clips in that language, and point `PHRASE_FILE` to it. The app can display Indian scripts using the system's Nirmala UI or Noto Devanagari font. Lip-reading datasets for Indian languages are very rare, so even a small one is an original contribution worth highlighting.
 
@@ -734,13 +747,17 @@ The app picks the recogniser automatically: the neural model if it was trained o
 
 ### What the screen shows
 
+- **Top bar:** status chips: how many phrases and the self-test accuracy, whether the LLM context check is on, and the output voice, labelled honestly as own recorded voice, cloned voice (AI-generated) or computer voice
 - **Left:** a face-mesh view of the webcam: dimmed video on a grid, the 478-point wireframe, glowing nodes and highlighted lips (**V** switches to the plain camera)
-- **Top right:** the predicted phrase, with confidence bars for the top 3 guesses
-- **Middle right:** the sentence being built
-- **Bottom:** status bar showing the mode, FPS, recogniser, LLM on/off, latency, and live MAR/motion values
-- **Top banner:** names the output voice honestly: own recorded voice, cloned voice (AI-generated), or computer voice
-- **Alert banner:** turns red with a sound when an emergency phrase is detected
+- **Below the video:** the **tap-to-speak board**, your phrases as tiles (emergency ones tinted red). Click one to say it. When the app is unsure, its three options are marked 1/2/3.
+- **Prediction card:** the recognised phrase with confidence bars for the top 3 (click a row to pick it)
+- **Mouth and muscle activity:** a live zoomed view of the lips with their contours, and bars for the facial muscle scores (jaw open, lips closed, pucker, funnel, press, smile...)
+- **Sentence and history:** the message being built, and the last phrases with time and how each was chosen (lips, lips + context, picked, corrected, tapped)
+- **Alert banner:** turns red with a sound when an emergency phrase is detected, repeats until acknowledged (A, or click the banner)
 - **Warnings on the video:** "No face detected" and "Too dark" with what to do
+- **Status bar:** mode, FPS, latency, tracker, and all the keys
+
+The panels are drawn with real fonts (Segoe UI; Nirmala UI for Hindi and Nepali) and redrawn only when their content changes, so the screen stays responsive on a low-power laptop.
 
 ### Keyboard controls
 
@@ -874,7 +891,7 @@ The script holds back one clip per phrase and prints accuracy on those clips bef
 | Area | What we do |
 |---|---|
 | **Consent** | Every data contributor and voice owner signs a consent form and can request deletion at any time. |
-| **Privacy** | Only lip coordinates are stored by default, never video. All processing runs on the laptop. The LLM never receives images or landmarks, and the whole system can run offline. |
+| **Privacy** | Only lip coordinates are stored by default, never video. All processing runs on the laptop. The LLM never receives images or landmarks, and the whole system can run offline. The conversation transcript stays on the laptop and can be turned off (`SAVE_TRANSCRIPT`); custom phrases (which may contain names) are never uploaded. |
 | **Voice-clone misuse** | Voices are cloned only with the owner's consent. In the app, the cloned voice can only say the fixed phrase list, not arbitrary text. The interface clearly labels the output as an AI-generated voice. Optionally, add an inaudible audio watermark (for example with Meta's AudioSeal) so the audio can be identified as synthetic. |
 | **Safety** | Low-confidence predictions are never spoken; the user picks from options instead. Emergency phrases use a lower alert threshold, because missing an emergency is worse than a false alarm. |
 | **Fairness** | We test across team members and volunteers of different genders, with and without facial hair and glasses, and with different skin tones, and we report accuracy for each person separately. |

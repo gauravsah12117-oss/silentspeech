@@ -7,6 +7,7 @@ models/*.npz
 models/*.task
 models/experiments/
 logs/
+phrases/custom.json
 
 # Python
 venv/

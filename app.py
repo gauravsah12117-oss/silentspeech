@@ -34,16 +34,27 @@ from src.landmarks import (BLENDSHAPE_NAMES, N_POINTS, draw_face_hud, draw_lips,
 from src.llm_corrector import LLMCorrector
 from src.recognizer import load_recognizer
 from src.speaker import Speaker
+from src import ui
+from src.ui import PanelCache
 from src.utils import (FPSCounter, draw_text, load_env, load_phrases, make_window, open_camera,
-                       start_session_log, wrap_text)
+                       start_session_log)
 
 WINDOW = "SilentSpeech"
-W, H = 1280, 640
-VX, VY, VW, VH = 16, 70, 640, 480      # video area
-PX = VX + VW + 24                      # right panel x
-WHITE, GREY, DIM = (255, 255, 255), (185, 185, 185), (120, 120, 120)
+W, H = 1280, 720
+VX, VY, VW, VH = 16, 72, 640, 480      # video area
+# panels: (x0, y0, x1, y1)
+HEADER = (0, 0, W, 62)
+BOARD = (16, 562, 656, 690)
+PRED = (672, 72, 1264, 292)
+WIDGETS = (672, 300, 1264, 456)
+SENT = (672, 464, 1264, 560)
+HIST = (672, 568, 1264, 690)
+STATUS = (0, 694, W, H)
+WHITE, GREY = (255, 255, 255), (185, 185, 185)
 GREEN, AMBER, RED = (90, 200, 90), (40, 170, 250), (60, 60, 230)
 NAN_ROW = np.full((N_POINTS, 3), np.nan, np.float32)
+SOURCE_LABEL = {"lips": "lips", "llm": "lips + context", "pick": "picked", "corrected": "corrected",
+                "tap": "tapped", "fallback": "lips (top guess)"}
 
 
 class App:
@@ -103,6 +114,7 @@ class App:
         self.hud = config.HUD_VIEW
         self.mesh = None
         self.has_blend = False
+        self.last_blend_live = None
         self.tracker_name = ""
         self.cap_blend = []
 
@@ -118,6 +130,15 @@ class App:
         self._learn_lock = threading.Lock()
         self._learn_again = False
         self._learn_thread = None
+
+        # interface: cached panels, mouse clicks, conversation log, alert repeats
+        self.ui = PanelCache()
+        self.clicks = []
+        self.tiles = []                 # [(rect, phrase_id)] on the phrase board
+        self.log = deque(maxlen=60)     # {"time", "pid", "source", "confidence"}
+        self.alert_last_beep = 0.0
+        self.muscles = None             # smoothed muscle-activity values for the bars
+        self.transcript = config.WORK_DIR / "logs" / f"conversation-{time.strftime('%Y-%m-%d')}.txt"
 
     # ------------------------------------------------------------------ text
     def text(self, pid):
@@ -170,23 +191,26 @@ class App:
 
         if d.alert_phrase_id:
             self.alert = d.alert_phrase_id
+            self.alert_last_beep = now
             self.speaker.alert()
+            self.write_transcript(f"ALERT raised: {self.text(d.alert_phrase_id)}")
         if d.action == "accept":
-            self.commit(d.phrase_id, f"Spoke it (confidence {d.confidence:.0%}).", now, d.candidates)
+            self.commit(d.phrase_id, f"Spoke it (confidence {d.confidence:.0%}).", now, d.candidates,
+                        source="lips", confidence=d.confidence)
         elif d.action == "llm":
             if self.llm_on:
                 self.pending = {"future": self.llm.submit(d.candidates, list(self.history), self.phrases),
                                 "deadline": now + config.LLM_TIMEOUT_S, "t_ref": now, "decision": d}
                 self.options = d.candidates
-                self.note = "Not fully sure - asking the LLM to use the conversation..."
+                self.note = f"Not fully sure - asking {self.llm.provider.title()} to use the conversation..."
             else:
                 self.commit(d.candidates[0][0], f"Medium confidence ({d.confidence:.0%}) - spoke the top guess.",
-                            now, d.candidates)
+                            now, d.candidates, source="fallback", confidence=d.confidence)
         else:
             self.options = d.candidates
-            self.note = "Not sure, so nothing was spoken. Please repeat, or press 1/2/3."
+            self.note = "Not sure, so nothing was spoken. Mouth it again, or press / click 1, 2 or 3."
 
-    def commit(self, pid, note, t_ref, candidates=None):
+    def commit(self, pid, note, t_ref, candidates=None, source="lips", confidence=None):
         self.sentence.append(pid)
         self.history.append(pid)
         self.options = None
@@ -194,6 +218,25 @@ class App:
         self.note = note
         self.last_committed = (pid, candidates or [])
         self.speaker.say([pid], t_ref)
+        self.log.append({"time": time.localtime(), "pid": pid, "source": source, "confidence": confidence})
+        conf = f" {confidence:.0%}" if confidence is not None else ""
+        self.write_transcript(f"{self.text(pid)}  [{SOURCE_LABEL.get(source, source)}{conf}]")
+
+    def write_transcript(self, line):
+        """Keep a plain-text record of the conversation for caregivers (logs/conversation-<date>.txt)."""
+        if not config.SAVE_TRANSCRIPT:
+            return
+        try:
+            self.transcript.parent.mkdir(parents=True, exist_ok=True)
+            with open(self.transcript, "a", encoding="utf-8") as f:
+                f.write(f"{time.strftime('%H:%M:%S')}  {line}\n")
+        except OSError:
+            pass
+
+    def tap(self, pid, now):
+        """Speak a phrase chosen on the phrase board (a fallback that needs no lip reading)."""
+        self.pending = None
+        self.commit(pid, f"You tapped \"{self.text(pid)}\".", now, source="tap")
 
     def resolve_llm(self, now):
         p = self.pending
@@ -206,12 +249,16 @@ class App:
             except Exception:
                 result = None
         d = p["decision"]
+        name = self.llm.provider.title()
         if result:
             pid, reason = result
-            note = f"LLM picked from the top-3 using context: {reason}" if reason else "LLM picked from the top-3."
+            note = f"{name} picked from the top 3 using the conversation: {reason}" if reason \
+                else f"{name} picked from the top 3."
+            source = "llm"
         else:
-            pid, note = d.candidates[0][0], "LLM too slow or unavailable - spoke the top guess."
-        self.commit(pid, note, p["t_ref"], d.candidates)
+            pid, note, source = d.candidates[0][0], f"{name} too slow or unavailable - spoke the top guess.", "fallback"
+        conf = dict(d.candidates).get(pid)
+        self.commit(pid, note, p["t_ref"], d.candidates, source=source, confidence=conf)
 
     # -------------------------------------------------------------- learning
     def learn(self, pid):
@@ -290,7 +337,7 @@ class App:
             pid = self.options[k - 1][0]
             cands = self.options
             self.pending = None
-            self.commit(pid, f"You picked option {k} - learned from it.", now, cands)
+            self.commit(pid, f"You picked option {k} - learned from it.", now, cands, source="pick")
             self.learn(pid)
         elif self.last_committed and self.sentence and self.sentence[-1] == self.last_committed[0]:
             cands = self.last_committed[1]
@@ -307,6 +354,9 @@ class App:
             self.last_committed = (pid, cands)
             self.note = f"Corrected to option {k} - learned from it."
             self.speaker.say([pid], now)
+            if self.log:
+                self.log[-1] = {**self.log[-1], "pid": pid, "source": "corrected"}
+            self.write_transcript(f"  corrected to: {self.text(pid)}")
             self.learn(pid)
 
     def handle_key(self, key, now):
@@ -320,6 +370,7 @@ class App:
             if self.sentence:
                 self.speaker.say(self.sentence, now)
                 self.note = "Speaking the whole sentence."
+                self.write_transcript("SENTENCE: " + ". ".join(self.text(p) for p in self.sentence) + ".")
         elif key in (8, 127):
             if self.sentence:
                 self.sentence.pop()
@@ -341,6 +392,8 @@ class App:
             else:
                 self.note = "LLM unavailable: " + self.llm.unavailable_reason
         elif key in (ord("a"), ord("A")):
+            if self.alert:
+                self.write_transcript(f"alert acknowledged: {self.text(self.alert)}")
             self.alert = None
         elif key in (ord("f"), ord("F")) and not self.capturing and not self.pending:
             self.toggle_focus()
@@ -385,25 +438,183 @@ class App:
                 self.active_run = 0
                 self.start_capture("auto", now, list(self.prebuffer))
                 self.prebuffer.clear()
+        if self.alert and now - self.alert_last_beep >= config.ALERT_REPEAT_SECONDS:
+            self.alert_last_beep = now          # nobody acknowledged yet: sound it again
+            self.speaker.alert()
         self.resolve_llm(now)
         return mar, motion
 
     # ---------------------------------------------------------------- render
+    @staticmethod
+    def _blank(rect):
+        x0, y0, x1, y1 = rect
+        return np.full((y1 - y0, x1 - x0, 3), ui.BG, np.uint8)
+
+    @staticmethod
+    def _paste(canvas, rect, img):
+        x0, y0, x1, y1 = rect
+        canvas[y0:y1, x0:x1] = img
+
+    def _candidates(self):
+        return self.decision.candidates if self.decision else []
+
+    def _candidate_rects(self):
+        """Clickable rows of the prediction card, in window coordinates."""
+        x0, y0, x1, _ = PRED
+        return [(x0 + 8, y0 + 76 + 32 * i, x1 - 8, y0 + 106 + 32 * i) for i in range(len(self._candidates()))]
+
+    def _headline(self, now):
+        d = self.decision
+        if self.capturing:
+            return "Listening...", ui.ACCENT
+        if self.pending and d:
+            return self.text(d.candidates[0][0]) + " ?", ui.AMBER
+        if self.options:
+            return "Not sure - pick 1, 2 or 3", ui.AMBER
+        if self.last_committed and self.sentence:
+            return self.text(self.sentence[-1]), ui.GREEN
+        if d:
+            return self.text(d.candidates[0][0]) + " ?", ui.MUTED
+        return "Press SPACE, then mouth a phrase", ui.DIM
+
+    def _render_header(self, blink):
+        img, p = self._blank(HEADER), ui.Painter()
+        if self.alert:
+            ui.rounded_rect(img, 8, 7, W - 8, 55, 12, ui.RED if blink else (40, 40, 150))
+            p.text(f"EMERGENCY  —  “{self.text(self.alert)}”  —  caregiver alerted.   "
+                   "Press A (or click here) to acknowledge.", (24, 31), 21, ui.TEXT, "bold", "lm")
+            return p.flush(img)
+        p.text("SilentSpeech", (20, 31), 28, ui.TEXT, "bold", "lm")
+        p.text("silent lips  ›  phrase  ›  their own voice", (214, 33), 15, ui.MUTED, "regular", "lm")
+        chips = []
+        if self.runtime is not None:
+            acc = getattr(self.runtime, "report", {}).get("loo_accuracy")
+            chips.append(((f"Focus {len(self.focus)} phrases" if self.focus else
+                           f"{len(self.runtime.label_map)} phrases") + (f" · ~{acc:.0%}" if acc else ""), ui.ACCENT))
+        chips.append((f"{self.llm.provider.title()} context on" if self.llm_on else "Context (LLM) off",
+                      ui.GREEN if self.llm_on else ui.DIM))
+        chips.append((f"Voice: {self.speaker.label}", ui.GREEN if "own" in self.speaker.label else ui.AMBER))
+        x = W - 16
+        for label, color in reversed(chips):
+            tw = ui.text_width(label, 13, "semibold")
+            ui.rounded_rect(img, x - tw - 34, 17, x, 45, 14, ui.CARD)
+            self.cv2.circle(img, (x - tw - 20, 31), 5, color, -1, self.cv2.LINE_AA)
+            p.text(label, (x - tw - 10, 31), 13, ui.TEXT, "semibold", "lm")
+            x -= tw + 44
+        return p.flush(img)
+
+    def _render_prediction(self, now):
+        img, p = self._blank(PRED), ui.Painter()
+        w, h = PRED[2] - PRED[0], PRED[3] - PRED[1]
+        ui.card(img, p, 0, 0, w - 1, h - 1, "Prediction")
+        headline, color = self._headline(now)
+        p.text(ui.wrap(headline, w - 32, 28, "bold", max_lines=1)[0], (16, 30), 28, color, "bold")
+        for i, (pid, prob) in enumerate(self._candidates()):
+            y = 76 + 32 * i
+            ui.rounded_rect(img, 16, y + 2, 42, y + 26, 6, (70, 62, 56))
+            p.text(str(i + 1), (29, y + 14), 14, ui.TEXT, "bold", "mm")
+            p.text(ui.wrap(self.text(pid), w - 270, 17, "semibold", max_lines=1)[0], (54, y + 14), 17, ui.TEXT,
+                   "semibold", "lm")
+            ui.bar(img, w - 200, y + 9, 130, 10, prob, ui.level_color(prob, config.CONF_ACCEPT, config.CONF_MIN))
+            p.text(f"{prob:.0%}", (w - 16, y + 14), 14, ui.MUTED, "regular", "rm")
+        note_color = ui.AMBER if (self.pending or self.options) else ui.MUTED
+        for j, line in enumerate(ui.wrap(self.note, w - 32, 14, "regular", max_lines=2)):
+            p.text(line, (16, h - 42 + 18 * j), 14, note_color)
+        return p.flush(img)
+
+    def _render_widgets_frame(self):
+        img, p = self._blank(WIDGETS), ui.Painter()
+        w, h = WIDGETS[2] - WIDGETS[0], WIDGETS[3] - WIDGETS[1]
+        ui.card(img, p, 0, 0, 260, h - 1, "Mouth")
+        ui.card(img, p, 270, 0, w - 1, h - 1, "Muscle activity")
+        if self.has_blend:
+            for i, (label, _) in enumerate(ui.MUSCLE_ROWS):
+                p.text(label, (284, 30 + 15 * i), 12, ui.MUTED, "regular", "lm")
+        else:
+            p.text("Needs the Face Landmarker tracker", (284, 60), 13, ui.DIM)
+        return p.flush(img)
+
+    def _render_sentence(self):
+        img, p = self._blank(SENT), ui.Painter()
+        w, h = SENT[2] - SENT[0], SENT[3] - SENT[1]
+        ui.card(img, p, 0, 0, w - 1, h - 1, "Sentence")
+        p.text("ENTER says it all", (w - 14, 15), 12, ui.DIM, "regular", "rm")
+        if self.sentence:
+            text = ". ".join(self.text(pid) for pid in self.sentence) + "."
+            lines = ui.wrap(text, w - 32, 20, "semibold")[-2:]
+            for j, line in enumerate(lines):
+                p.text(line, (16, 32 + 26 * j), 20, ui.TEXT, "semibold")
+        else:
+            p.text("(empty) - phrases you say are collected here", (16, 40), 15, ui.DIM)
+        return p.flush(img)
+
+    def _render_history(self):
+        img, p = self._blank(HIST), ui.Painter()
+        w, h = HIST[2] - HIST[0], HIST[3] - HIST[1]
+        ui.card(img, p, 0, 0, w - 1, h - 1, "History")
+        p.text(f"saved to logs/{self.transcript.name}" if config.SAVE_TRANSCRIPT else "", (w - 14, 15), 11,
+               ui.DIM, "regular", "rm")
+        entries = list(self.log)[-4:][::-1]
+        if not entries:
+            p.text("Nothing said yet.", (16, 40), 14, ui.DIM)
+        for j, e in enumerate(entries):
+            y = 34 + 21 * j
+            p.text(time.strftime("%H:%M", e["time"]), (16, y), 13, ui.DIM)
+            p.text(ui.wrap(self.text(e["pid"]), w - 250, 15, "semibold", max_lines=1)[0], (66, y - 1), 15,
+                   ui.TEXT if j == 0 else ui.MUTED, "semibold")
+            tag = SOURCE_LABEL.get(e["source"], e["source"])
+            if e.get("confidence") is not None and e["source"] in ("lips", "llm", "fallback"):
+                tag += f" {e['confidence']:.0%}"
+            p.text(tag, (w - 14, y), 12, ui.DIM, "regular", "ra")
+        return p.flush(img)
+
+    def _board_ids(self):
+        """Phrases shown on the tap-to-speak board: current candidates first, at most 10."""
+        if self.runtime is None:
+            return []
+        ids = [pid for pid, _ in self._candidates()]
+        ids += [pid for pid in self.runtime.label_map if pid not in ids]
+        return ids[:10]
+
+    def _tile_rects(self, n):
+        x0, y0, x1, y1 = BOARD
+        cols, rows, gap = 5, 2, 6
+        tw = (x1 - x0 - 24 - gap * (cols - 1)) / cols
+        th = (y1 - y0 - 34 - gap * (rows - 1)) / rows
+        return [(int(x0 + 12 + (i % cols) * (tw + gap)), int(y0 + 28 + (i // cols) * (th + gap)),
+                 int(x0 + 12 + (i % cols) * (tw + gap) + tw), int(y0 + 28 + (i // cols) * (th + gap) + th))
+                for i in range(n)]
+
+    def _render_board(self, ids, highlight):
+        img, p = self._blank(BOARD), ui.Painter()
+        w, h = BOARD[2] - BOARD[0], BOARD[3] - BOARD[1]
+        ui.card(img, p, 0, 0, w - 1, h - 1, "Tap to speak")
+        p.text("click a phrase to say it", (w - 14, 15), 12, ui.DIM, "regular", "rm")
+        for (x0, y0, x1, y1), pid in zip(self._tile_rects(len(ids)), ids):
+            x0, y0, x1, y1 = x0 - BOARD[0], y0 - BOARD[1], x1 - BOARD[0], y1 - BOARD[1]
+            emergency = self.phrases[pid].get("emergency")
+            fill = (55, 45, 88) if emergency else (58, 52, 47)
+            ui.rounded_rect(img, x0, y0, x1, y1, 8, fill)
+            if pid in highlight:
+                color, number = highlight[pid]
+                ui.rounded_rect(img, x0, y0, x1, y1, 8, color, 2)
+                if number:
+                    p.text(str(number), (x0 + 7, y0 + 4), 11, color, "bold")
+            lines = ui.wrap(self.text(pid), x1 - x0 - 12, 13, "semibold", max_lines=2)
+            for j, line in enumerate(lines):
+                yy = (y0 + y1) / 2 + (j - (len(lines) - 1) / 2) * 15
+                p.text(line, ((x0 + x1) / 2, yy), 13, ui.TEXT, "semibold", "mm")
+        return p.flush(img)
+
     def render(self, frame, pts, mar, motion, now):
         cv2 = self.cv2
-        canvas = np.full((H, W, 3), (28, 24, 22), np.uint8)
+        canvas = np.full((H, W, 3), ui.BG, np.uint8)
+        blink = bool(self.alert) and int(now * 2) % 2 == 0
+        self._paste(canvas, HEADER, self.ui.get(
+            "header", (self.alert, blink, self.focus and len(self.focus), self.llm_on, self.speaker.label,
+                       id(self.runtime)), lambda: self._render_header(blink)))
 
-        # banner
-        if self.alert:
-            cv2.rectangle(canvas, (0, 0), (W, 56), (0, 0, 210) if int(now * 2) % 2 == 0 else (0, 0, 140), -1)
-            draw_text(canvas, f'EMERGENCY: "{self.text(self.alert)}" - caregiver alerted. Press A to acknowledge.',
-                      (16, 37), 0.75, WHITE, 2)
-        else:
-            draw_text(canvas, "SilentSpeech", (16, 38), 0.95, WHITE, 2)
-            draw_text(canvas, "silent lips -> phrase -> their own voice", (230, 37), 0.55, GREY, 1)
-            draw_text(canvas, f"Output: {self.speaker.label}", (W - 400, 37), 0.5, GREY, 1)
-
-        # video: face-mesh "hologram" view (V toggles) or the plain camera with lip contours
+        # video: face-mesh view (V toggles) or the plain camera with lip contours
         view = draw_face_hud(frame, self.mesh, pts) if self.hud else draw_lips(frame.copy(), pts)
         view = cv2.flip(view, 1)
         if self.hud and self.mesh is not None:
@@ -415,69 +626,86 @@ class App:
         if self.brightness is not None and self.brightness < 50:
             draw_text(view, "Too dark: put a light in front of you", (12, 58), 0.6, AMBER, 2)
         if self.capturing:
-            cv2.circle(view, (VW - 90, 28), 11, (0, 0, 255), -1, cv2.LINE_AA)
-            draw_text(view, "REC", (VW - 72, 36), 0.7, (0, 0, 255), 2)
+            pulse = 9 + int(3 * abs(np.sin(now * 6)))
+            cv2.circle(view, (VW - 92, 28), pulse, (0, 0, 255), -1, cv2.LINE_AA)
+            draw_text(view, "REC", (VW - 74, 36), 0.7, (0, 0, 255), 2)
             frac = (now - self.cap_start) / (config.RECORD_SECONDS if self.cap_kind == "ptt" else config.AUTO_MAX_SECONDS)
             cv2.rectangle(view, (0, VH - 8), (int(VW * min(frac, 1)), VH), (0, 0, 255), -1)
         elif self.mode == "auto":
             draw_text(view, "AUTO - listening for lip movement", (12, VH - 16), 0.55, AMBER, 1)
+        ui.rounded_rect(canvas, VX - 2, VY - 2, VX + VW + 1, VY + VH + 1, 6, ui.CARD_EDGE, 1)
         canvas[VY:VY + VH, VX:VX + VW] = view
 
-        # prediction panel
-        y = VY + 24
-        draw_text(canvas, "PREDICTION", (PX, y), 0.5, DIM, 1)
-        y += 40
-        d = self.decision
-        if d:
-            if self.pending:
-                headline = self.text(d.candidates[0][0]) + " ?"
-            elif self.options:
-                headline = "Not sure - pick 1, 2 or 3"
-            elif self.last_committed and self.sentence:
-                headline = self.text(self.sentence[-1])
-            else:
-                headline = self.text(d.candidates[0][0]) + " ?"
-            draw_text(canvas, headline, (PX, y), 1.0, WHITE, 2)
-            y += 30
-            for k, (pid, p) in enumerate(d.candidates, 1):
-                col = GREEN if p >= config.CONF_ACCEPT else AMBER if p >= config.CONF_MIN else RED
-                draw_text(canvas, f"[{k}] {self.text(pid)}", (PX, y + 16), 0.55, WHITE, 1)
-                bx, bw = PX + 330, 180
-                cv2.rectangle(canvas, (bx, y + 4), (bx + bw, y + 20), (60, 60, 60), -1)
-                cv2.rectangle(canvas, (bx, y + 4), (bx + int(bw * p), y + 20), col, -1)
-                draw_text(canvas, f"{p:.0%}", (bx + bw + 8, y + 18), 0.5, GREY, 1)
-                y += 30
+        # prediction, sentence, history: re-drawn only when their content changes
+        cands = tuple((pid, round(p, 2)) for pid, p in self._candidates())
+        self._paste(canvas, PRED, self.ui.get(
+            "pred", (self._headline(now), cands, self.note, bool(self.options), bool(self.pending)),
+            lambda: self._render_prediction(now)))
+        self._paste(canvas, SENT, self.ui.get("sentence", tuple(self.sentence), self._render_sentence))
+        self._paste(canvas, HIST, self.ui.get(
+            "history", tuple((e["pid"], e["source"], time.mktime(e["time"])) for e in self.log), self._render_history))
+
+        # mouth close-up + live muscle bars (every frame)
+        widgets = self.ui.get("widgets", self.has_blend, self._render_widgets_frame).copy()
+        widgets[24:24 + 124, 10:10 + 240] = ui.mouth_inset(frame, pts, (240, 124))
+        values = ui.muscle_values(self.last_blend_live) if self.has_blend else None
+        if values is not None:
+            self.muscles = values if self.muscles is None else 0.5 * self.muscles + 0.5 * values
+            for i, v in enumerate(self.muscles):
+                ui.bar(widgets, 400, 25 + 15 * i, WIDGETS[2] - WIDGETS[0] - 416, 8, v, ui.ACCENT)
+        self._paste(canvas, WIDGETS, widgets)
+
+        # tap-to-speak board
+        ids = self._board_ids()
+        self.tiles = list(zip(self._tile_rects(len(ids)), ids))
+        cands = self._candidates()
+        if self.options:          # unsure: the three choices, numbered, in amber
+            highlight = {pid: (ui.AMBER, k) for k, (pid, _) in enumerate(self.options, 1)}
+        elif cands:               # otherwise just the best guess, coloured by confidence
+            highlight = {cands[0][0]: (ui.level_color(cands[0][1], config.CONF_ACCEPT, config.CONF_MIN), None)}
         else:
-            draw_text(canvas, "-", (PX, y), 1.0, DIM, 2)
-            y += 30
-        y += 10
-        for line in wrap_text(self.note, 60)[:3]:
-            draw_text(canvas, line, (PX, y), 0.52, AMBER if self.pending or self.options else GREY, 1)
-            y += 22
+            highlight = {}
+        self._paste(canvas, BOARD, self.ui.get(
+            "board", (tuple(ids), tuple(sorted(highlight.items()))), lambda: self._render_board(ids, highlight)))
 
-        # sentence
-        y = max(y + 18, VY + 290)
-        draw_text(canvas, "SENTENCE", (PX, y), 0.5, DIM, 1)
-        y += 32
-        sentence = ". ".join(self.text(pid) for pid in self.sentence) + ("." if self.sentence else "")
-        for line in (wrap_text(sentence, 42) or ["(empty)"])[-4:]:
-            draw_text(canvas, line, (PX, y), 0.75, WHITE if self.sentence else DIM, 2 if self.sentence else 1)
-            y += 32
-
-        draw_text(canvas, "SPACE capture  1/2/3 pick  ENTER speak  BKSP undo  C clear",
-                  (PX, VY + VH - 26), 0.45, DIM, 1)
-        draw_text(canvas, "F focus  V view  M mode  L LLM  A ack alert  Q quit", (PX, VY + VH - 6), 0.45, DIM, 1)
-
-        # status bar
-        cv2.rectangle(canvas, (0, H - 36), (W, H), (48, 44, 42), -1)
-        llm = f"ON ({self.llm.provider})" if self.llm_on else "OFF"
+        # status bar: refreshed twice a second
         lat = self.speaker.last_latency_ms
-        rec = "-" if self.runtime is None else self.runtime.kind + (f" (focus {len(self.focus)})" if self.focus else "")
-        status = (f"Mode: {'PUSH-TO-TALK' if self.mode == 'ptt' else 'AUTO'}   FPS {self.fps.fps:4.1f}   "
-                  f"Recogniser: {rec}   LLM: {llm}   Speaker: {self.args.speaker}   "
-                  f"Latency: {'-' if lat is None else f'{lat:.0f} ms'}   MAR {mar:.2f}  motion {motion:.3f}")
-        draw_text(canvas, status, (16, H - 12), 0.5, GREY, 1)
+        status_key = (int(now * 2), self.mode, round(self.fps.fps), lat and round(lat))
+        self._paste(canvas, STATUS, self.ui.get("status", status_key, lambda: self._render_status(lat)))
         return canvas
+
+    def _render_status(self, lat):
+        img, p = self._blank(STATUS), ui.Painter()
+        img[:] = (34, 30, 28)
+        left = (f"{'PUSH-TO-TALK' if self.mode == 'ptt' else 'AUTO MODE'}   ·   {self.fps.fps:4.1f} FPS   ·   "
+                f"latency {'-' if lat is None else f'{lat:.0f} ms'}   ·   {self.tracker_name or 'tracker'}   ·   "
+                f"speaker {self.args.speaker}")
+        p.text(left, (16, 13), 12, ui.MUTED, "regular", "lm")
+        p.text("SPACE speak  ·  1/2/3 pick  ·  ENTER say all  ·  BKSP undo  ·  C clear  ·  "
+               "F focus  ·  V view  ·  M mode  ·  L context  ·  Q quit",
+               (W - 16, 13), 12, ui.DIM, "regular", "rm")
+        return p.flush(img)
+
+    # ----------------------------------------------------------------- mouse
+    def on_mouse(self, event, x, y, flags, param):
+        if event == self.cv2.EVENT_LBUTTONDOWN:
+            self.clicks.append((x, y))
+
+    def handle_clicks(self, now):
+        clicks, self.clicks = self.clicks, []
+        for x, y in clicks:
+            if self.alert and y < HEADER[3]:
+                self.handle_key(ord("a"), now)
+                continue
+            for k, (x0, y0, x1, y1) in enumerate(self._candidate_rects(), 1):
+                if x0 <= x <= x1 and y0 <= y <= y1:
+                    self.pick(k, now)
+                    break
+            else:
+                for (x0, y0, x1, y1), pid in self.tiles:
+                    if x0 <= x <= x1 and y0 <= y <= y1 and not self.capturing:
+                        self.tap(pid, now)
+                        break
 
     # ------------------------------------------------------------------ main
     def run(self):
@@ -486,6 +714,7 @@ class App:
         if cap is None:
             sys.exit("Could not open the webcam. Try --camera 1, close Zoom/Teams, or run python check_setup.py.")
         make_window(WINDOW, W, H)
+        cv2.setMouseCallback(WINDOW, self.on_mouse)
         failures = 0
         try:
             with make_tracker() as tracker:
@@ -506,8 +735,10 @@ class App:
                     now = time.perf_counter()
                     pts = tracker.process(frame)
                     self.mesh, blend = tracker.last_mesh, tracker.last_blendshapes
+                    self.last_blend_live = blend
                     self.has_blend = self.has_blend or blend is not None
                     mar, motion = self.step(pts, now, blend)
+                    self.handle_clicks(now)
                     cv2.imshow(WINDOW, self.render(frame, pts, mar, motion, now))
                     key = cv2.waitKey(1) & 0xFF
                     if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:

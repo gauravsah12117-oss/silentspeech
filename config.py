@@ -4,11 +4,24 @@ Change behaviour here instead of editing code. Secrets (API keys) belong in
 `.env`, never in this file.
 """
 import os
+import sys
 from pathlib import Path
 
 # Hide MediaPipe/TensorFlow Lite start-up chatter (it looks like errors but isn't).
 os.environ.setdefault("GLOG_minloglevel", "2")
 os.environ.setdefault("TF_CPP_MIN_LOG_LEVEL", "3")
+
+# Phrases can be in any script (Hindi, Nepali...). When output goes to a pipe or
+# file instead of a console window, Windows defaults to cp1252 and would crash
+# on them; write UTF-8 there, and never crash on a character that can't be shown.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        if _stream is not None and not _stream.isatty():
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        elif _stream is not None:
+            _stream.reconfigure(errors="replace")
+    except (AttributeError, ValueError, OSError):
+        pass
 
 ROOT = Path(__file__).resolve().parent
 
@@ -31,6 +44,7 @@ COUNTDOWN_SECONDS = 3         # 3-2-1 before each recorded clip
 
 # --- Phrases ---------------------------------------------------------------
 PHRASE_FILE = ROOT / "phrases" / "phrases_en.json"
+CUSTOM_PHRASE_FILE = WORK_DIR / "phrases" / "custom.json"   # your own phrases (add_phrase.py), kept out of git
 PHRASE_SET = "mvp"            # "mvp" = P01-P30, "full" = all 50
 LANGUAGE = "en"               # XTTS-v2 language code used for the cloned voice
 
@@ -69,6 +83,10 @@ PHRASE_GAP_S = 0.25           # silence between phrases when speaking a sentence
 
 # --- Privacy ---------------------------------------------------------------
 SAVE_VIDEO = False            # save raw video too (only for poster images, with consent)
+SAVE_TRANSCRIPT = True        # keep a text record of what was said (logs/conversation-<date>.txt)
+
+# --- Safety ----------------------------------------------------------------
+ALERT_REPEAT_SECONDS = 20     # repeat the emergency tone until someone presses A
 
 # --- Automatic clip quality checks (collect_data.py, enroll.py) -------------
 MAX_FACE_LOST_FRAC = 0.10     # reject if the face is lost in more than 10% of frames
