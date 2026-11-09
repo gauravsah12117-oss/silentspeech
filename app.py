@@ -8,7 +8,8 @@
 
 Keys
     SPACE      capture a phrase (push-to-talk; also works in auto mode)
-    1 / 2 / 3  pick an option when the system is unsure, or correct the last phrase
+    1 / 2 / 3  pick an option when the system is unsure, or correct / confirm the last phrase
+               (with instant templates, every choice is kept as a new example: it learns as you use it)
     ENTER      speak the whole sentence
     BACKSPACE  remove the last phrase          C  clear the sentence
     M          push-to-talk <-> auto mode      L  LLM layer on/off
@@ -16,6 +17,7 @@ Keys
 """
 import argparse
 import sys
+import threading
 import time
 from collections import deque
 
@@ -92,6 +94,13 @@ class App:
         self.history = deque(maxlen=config.LLM_CONTEXT_PHRASES)
         self.fps = FPSCounter()
 
+        # learning from the user's 1/2/3 choices
+        self.last_clip = None
+        self.learned_path = None
+        self._learn_lock = threading.Lock()
+        self._learn_again = False
+        self._learn_thread = None
+
     # ------------------------------------------------------------------ text
     def text(self, pid):
         return self.phrases[pid]["text"]
@@ -119,6 +128,8 @@ class App:
         if self.runtime is None:
             self.note = "No trained model yet - run collect_data.py and train.py."
             return
+        print(f"[capture] {len(clip)} frames in {duration:.1f} s ({len(clip) / max(duration, 1e-3):.0f} FPS), "
+              f"lip motion {lip_motion(normalise(fill_missing(clip))):.2f}")
         if self.cap_kind == "auto":  # look like a fixed push-to-talk window again
             fps = len(clip) / max(duration, 1e-3)
             clip = pad_to_length(clip, int(round(config.RECORD_SECONDS * fps)))
@@ -126,6 +137,7 @@ class App:
         if probs is None:
             self.note = "Face not visible enough - please repeat."
             return
+        self.last_clip, self.learned_path = clip, None
         d = decide(probs, self.runtime.label_map, self.phrases)
         self.decision = d
         top = ", ".join(f"{pid} {p:.2f}" for pid, p in d.candidates)
@@ -176,23 +188,77 @@ class App:
             pid, note = d.candidates[0][0], "LLM too slow or unavailable - spoke the top guess."
         self.commit(pid, note, p["t_ref"], d.candidates)
 
+    # -------------------------------------------------------------- learning
+    def learn(self, pid):
+        """Keep a clip the user confirmed (1/2/3) as a new example of that phrase.
+
+        Only explicit choices are learned, never automatic guesses, so mistakes
+        are not reinforced. The templates are rebuilt in the background.
+        """
+        if self.last_clip is None or not config.LEARN_FROM_CHOICES or getattr(self.runtime, "kind", "") != "templates":
+            return
+        from collect_data import append_metadata, remove_metadata
+        if self.learned_path is not None:          # changed their mind about the same clip
+            self.learned_path.unlink(missing_ok=True)
+            remove_metadata(self.learned_path.relative_to(config.DATA_DIR).as_posix())
+        folder = config.RAW_DIR / self.args.speaker / pid
+        folder.mkdir(parents=True, exist_ok=True)
+        session = config.LEARN_SESSION
+        reps = [int(p.stem.split("_")[1]) for p in folder.glob(f"{session}_*.npy")]
+        path = folder / f"{session}_{max(reps, default=0) + 1:02d}.npy"
+        np.save(path, self.last_clip.astype(np.float32))
+        append_metadata({"file": path.relative_to(config.DATA_DIR).as_posix(), "speaker": self.args.speaker,
+                         "session": session, "phrase_id": pid, "phrase_text": self.text(pid),
+                         "frames": len(self.last_clip), "fps": "", "lighting": "live", "glasses": 0,
+                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")})
+        self.learned_path = path
+        print(f"[learn] saved your choice as a new example of {pid} ({path.name})")
+        with self._learn_lock:
+            self._learn_again = True
+            if self._learn_thread is None or not self._learn_thread.is_alive():
+                self._learn_thread = threading.Thread(target=self._refresh_templates, daemon=True)
+                self._learn_thread.start()
+
+    def _refresh_templates(self):
+        from src.templates import for_speaker
+        while True:
+            with self._learn_lock:
+                if not self._learn_again:
+                    self._learn_thread = None
+                    return
+                self._learn_again = False
+            try:
+                m = for_speaker(self.args.speaker, self.runtime.label_map, rebuild=True)
+                if m is not None and m.label_map == self.runtime.label_map:
+                    self.runtime = m
+                    print(f"[learn] recogniser updated: {m.describe()}")
+            except Exception as e:
+                print(f"[learn] update failed: {e}")
+
     # ----------------------------------------------------------------- input
     def pick(self, k, now):
         if self.options and k <= len(self.options):
             pid = self.options[k - 1][0]
             cands = self.options
             self.pending = None
-            self.commit(pid, f"You picked option {k}.", now, cands)
+            self.commit(pid, f"You picked option {k} - learned from it.", now, cands)
+            self.learn(pid)
         elif self.last_committed and self.sentence and self.sentence[-1] == self.last_committed[0]:
             cands = self.last_committed[1]
-            if k <= len(cands) and cands[k - 1][0] != self.sentence[-1]:
-                pid = cands[k - 1][0]
-                self.sentence[-1] = pid
-                if self.history:
-                    self.history[-1] = pid
-                self.last_committed = (pid, cands)
-                self.note = f"Corrected to option {k}."
-                self.speaker.say([pid], now)
+            if k > len(cands):
+                return
+            pid = cands[k - 1][0]
+            if pid == self.sentence[-1]:            # "yes, that was right"
+                self.note = f"Confirmed \"{self.text(pid)}\" - learned from it."
+                self.learn(pid)
+                return
+            self.sentence[-1] = pid
+            if self.history:
+                self.history[-1] = pid
+            self.last_committed = (pid, cands)
+            self.note = f"Corrected to option {k} - learned from it."
+            self.speaker.say([pid], now)
+            self.learn(pid)
 
     def handle_key(self, key, now):
         if key in (ord("q"), ord("Q"), 27):

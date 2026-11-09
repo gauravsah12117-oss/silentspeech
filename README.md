@@ -26,7 +26,7 @@ The first run installs everything (about 1 GB). Then a guided setup:
 4. **Voice:** say each phrase once to use your own voice, or use the computer voice.
 5. **Live app:** press SPACE, mouth a phrase, and hear it.
 
-No training is needed: the *instant templates* recogniser compares what you mouth with your own calibration clips (section 6.7). For the competition dataset and the neural model, follow sections 13–15. Run `start.py` again any time; finished steps are skipped.
+No training is needed: the *instant templates* recogniser compares what you mouth with your own calibration clips (section 6.7). It also learns while you use it: whenever you pick or confirm a phrase with 1/2/3, that clip becomes a new example. For the competition dataset and the neural model, follow sections 13–15. Run `start.py` again any time; finished steps are skipped. To go straight to the live app, double-click `app.bat`.
 
 ---
 
@@ -735,7 +735,7 @@ The app picks the recogniser automatically: the neural model if it was trained o
 | Key | Action |
 |---|---|
 | SPACE | Capture a phrase (push-to-talk mode) |
-| 1 / 2 / 3 | Pick one of the top-3 options when the system is unsure, or correct the last phrase |
+| 1 / 2 / 3 | Pick one of the top-3 options when the system is unsure, or correct (or confirm) the last phrase. With instant templates, each choice is saved as a new example, so the app learns while you use it. |
 | ENTER | Speak the full sentence |
 | BACKSPACE | Remove the last phrase from the sentence |
 | C | Clear the sentence |

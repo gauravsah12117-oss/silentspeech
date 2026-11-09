@@ -228,9 +228,11 @@ def main(argv=None):
     heading(2, "calibration")
     counts = clip_counts(speaker, list(all_phrases))
     ready = [pid for pid, n in counts.items() if n >= config.QUICKSTART_REPS]
+    recorded_now = False
     if ready and not args.recalibrate and yes(f"Found calibration for {len(ready)} phrase(s) for {speaker}. Use it?", True):
         phrases = {pid: all_phrases[pid] for pid in all_phrases if pid in ready}
     else:
+        recorded_now = True
         phrases = choose_phrases(all_phrases)
         reps = config.QUICKSTART_REPS
         if args.recalibrate:   # another round on top of what is there
@@ -245,7 +247,7 @@ def main(argv=None):
     heading(3, "checking the calibration")
     m = build_templates(speaker, list(phrases))
     weak = report(m, all_phrases)
-    if weak and yes(f"Record 2 more clips of the {len(weak)} weakest phrase(s)? It usually helps.", True):
+    if weak and yes(f"Record 2 more clips of the {len(weak)} weakest phrase(s)? It usually helps.", recorded_now):
         extra = max(counts[pid] for pid in weak) + 2
         record(speaker, CAL_SESSION, extra, {pid: all_phrases[pid] for pid in weak}, args.camera, "Extra clips")
         m = build_templates(speaker, list(phrases))
