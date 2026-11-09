@@ -32,6 +32,40 @@ def seed_everything(seed=config.SEED):
         pass
 
 
+class _Tee:
+    """Writes to the console and to a session log file."""
+
+    def __init__(self, stream, log):
+        self._stream, self._log = stream, log
+
+    def write(self, text):
+        n = self._stream.write(text)
+        try:
+            self._log.write(text)
+            self._log.flush()
+        except (OSError, ValueError):
+            pass
+        return n
+
+    def flush(self):
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+
+def start_session_log(prefix):
+    """Copy everything printed (and any crash) to logs/<prefix>-<time>.log. Returns (path, file)."""
+    from datetime import datetime
+
+    folder = config.WORK_DIR / "logs"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{prefix}-{datetime.now():%Y%m%d-%H%M%S}.log"
+    log = open(path, "a", encoding="utf-8", errors="replace")
+    sys.stdout, sys.stderr = _Tee(sys.stdout, log), _Tee(sys.stderr, log)
+    return path, log
+
+
 # --- Phrases -----------------------------------------------------------------
 
 def load_phrases(path=None, phrase_set=None):

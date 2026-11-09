@@ -34,7 +34,8 @@ from src.landmarks import (BLENDSHAPE_NAMES, N_POINTS, draw_face_hud, draw_lips,
 from src.llm_corrector import LLMCorrector
 from src.recognizer import load_recognizer
 from src.speaker import Speaker
-from src.utils import FPSCounter, draw_text, load_env, load_phrases, make_window, open_camera, wrap_text
+from src.utils import (FPSCounter, draw_text, load_env, load_phrases, make_window, open_camera,
+                       start_session_log, wrap_text)
 
 WINDOW = "SilentSpeech"
 W, H = 1280, 640
@@ -533,10 +534,17 @@ def main(argv=None):
     ap.add_argument("--focus", type=int, metavar="N",
                     help="start with only your N most reliable phrases (press F in the app to switch)")
     args = ap.parse_args(argv)
-    app = App(args)
-    if args.focus:
-        app.toggle_focus(args.focus)
-    app.run()
+    log_path, _ = start_session_log("app")
+    try:
+        app = App(args)
+        if args.focus:
+            app.toggle_focus(args.focus)
+        app.run()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print(f"\nSomething went wrong. The details are saved in:\n  {log_path}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":

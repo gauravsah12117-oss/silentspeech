@@ -20,45 +20,18 @@ import argparse
 import re
 import sys
 import traceback
-from datetime import datetime
 
 import config
-from src.utils import load_env, load_phrases
+from src.utils import load_env, load_phrases, start_session_log
 
 CAL_SESSION = 1
 TRAIN_SESSION = 2      # extra examples from --train-more
 _LOG = None   # session log file (everything shown in the window, plus the answers)
 
 
-class _Tee:
-    """Writes to the console and to the session log."""
-
-    def __init__(self, stream, log):
-        self._stream, self._log = stream, log
-
-    def write(self, text):
-        n = self._stream.write(text)
-        try:
-            self._log.write(text)
-            self._log.flush()
-        except (OSError, ValueError):
-            pass
-        return n
-
-    def flush(self):
-        self._stream.flush()
-
-    def __getattr__(self, name):
-        return getattr(self._stream, name)
-
-
 def start_log():
     global _LOG
-    folder = config.WORK_DIR / "logs"
-    folder.mkdir(parents=True, exist_ok=True)
-    path = folder / f"start-{datetime.now():%Y%m%d-%H%M%S}.log"
-    _LOG = open(path, "a", encoding="utf-8", errors="replace")
-    sys.stdout, sys.stderr = _Tee(sys.stdout, _LOG), _Tee(sys.stderr, _LOG)
+    path, _LOG = start_session_log("start")
     return path
 
 
