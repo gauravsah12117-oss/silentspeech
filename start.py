@@ -165,6 +165,14 @@ def report(m, phrases):
         return []
     print(f"\nCalibration check: {acc:.0%} of your clips were recognised correctly from the others.")
     print("(This is measured on clips from the same sitting, so live use is usually a little lower.)")
+    for name, reason in m.report.get("dropped", []):
+        pid = name.split()[0]
+        print(f"  left out one clip of \"{phrases[pid]['text']}\": {reason}")
+    if acc < 0.7:
+        print("Tips for a better score:")
+        print("  - mouth each phrase the SAME way every time: clearly, at your normal speed")
+        print("  - start right when the red REC dot appears and finish before the red bar ends")
+        print("  - keep your head still and your face well lit from the front")
     weak = [pid for pid, a in m.report.get("per_phrase", {}).items() if a < 0.67]
     for pair, n in list(m.report.get("confusions", {}).items())[:3]:
         a, b = pair.split(">")

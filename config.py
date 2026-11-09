@@ -68,8 +68,9 @@ SAVE_VIDEO = False            # save raw video too (only for poster images, with
 # --- Automatic clip quality checks (collect_data.py, enroll.py) -------------
 MAX_FACE_LOST_FRAC = 0.10     # reject if the face is lost in more than 10% of frames
 MIN_FPS = 20                  # reject if the camera delivered fewer frames per second
-MIN_LIP_MOTION = 0.03         # reject if lip opening/width changed less than this
-                              # (in eye-distance units: the lips barely moved)
+MIN_LIP_MOTION = 0.06         # reject if lip opening/width changed less than this
+                              # (in eye-distance units: the lips barely moved).
+                              # Real mouthing measured 0.16-0.35; a missed clip 0.04.
 
 # --- Auto mode (start/stop detection in app.py) ------------------------------
 # Starting values; watch the live MAR/motion readout in the status bar and tune.

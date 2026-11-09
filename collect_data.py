@@ -233,7 +233,7 @@ def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=
                 header = [p["text"],
                           f"Clip {n_done + 1} of {reps} for this phrase ({SPEED_HINTS[n_done % 3]})  |  "
                           f"{done}/{reps * len(items)} done  |  {title}: {speaker}, session {session}",
-                          "Start and end with lips gently closed. Mouth silently, no sound.",
+                          "Lips closed, then mouth it silently - the SAME way every time - then close them.",
                           "SPACE record   R redo last   N skip phrase   Q save and quit"
                           + ("   P pause" if auto_advance else "")]
                 if paused:
