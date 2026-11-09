@@ -15,6 +15,7 @@ Keys
     M          push-to-talk <-> auto mode      L  LLM layer on/off
     A          acknowledge an emergency alert  Q  quit
     F          focus: switch to your most reliable phrases (higher accuracy) and back
+    V          view: face-mesh hologram <-> plain camera
 """
 import argparse
 import sys
@@ -27,7 +28,9 @@ import numpy as np
 import config
 from src.decision import decide
 from src.features import fill_missing, frame_motion, lip_motion, normalise, pad_to_length
-from src.landmarks import N_POINTS, LipTracker, draw_lips, mouth_aspect_ratio
+from src.dataset import blendshape_path
+from src.landmarks import (BLENDSHAPE_NAMES, N_POINTS, draw_face_hud, draw_lips, make_tracker,
+                           mouth_aspect_ratio)
 from src.llm_corrector import LLMCorrector
 from src.recognizer import load_recognizer
 from src.speaker import Speaker
@@ -95,6 +98,13 @@ class App:
         self.history = deque(maxlen=config.LLM_CONTEXT_PHRASES)
         self.fps = FPSCounter()
 
+        # face-mesh view (V)
+        self.hud = config.HUD_VIEW
+        self.mesh = None
+        self.has_blend = False
+        self.tracker_name = ""
+        self.cap_blend = []
+
         # focus mode (F): only the speaker's most reliable phrases
         self.full_runtime = self.runtime
         self.focus = None
@@ -102,6 +112,7 @@ class App:
 
         # learning from the user's 1/2/3 choices
         self.last_clip = None
+        self.last_blend = None
         self.learned_path = None
         self._learn_lock = threading.Lock()
         self._learn_again = False
@@ -112,9 +123,10 @@ class App:
         return self.phrases[pid]["text"]
 
     # --------------------------------------------------------------- capture
-    def start_capture(self, kind, now, seed_rows=()):
+    def start_capture(self, kind, now, seed=()):
         self.capturing, self.cap_kind, self.cap_start = True, kind, now
-        self.cap_points = list(seed_rows)
+        self.cap_points = [row for row, _ in seed]
+        self.cap_blend = [b for _, b in seed]
         self.still_since = None
         self.options = None
 
@@ -123,6 +135,10 @@ class App:
         self.cooldown_until = now + config.AUTO_COOLDOWN_SECONDS
         duration = now - self.cap_start
         clip = np.stack(self.cap_points) if self.cap_points else np.zeros((0, N_POINTS, 3), np.float32)
+        blend = None
+        if any(b is not None for b in self.cap_blend):          # the 52 muscle scores, if the tracker has them
+            nan_bs = np.full(len(BLENDSHAPE_NAMES), np.nan, np.float32)
+            blend = np.stack([b if b is not None else nan_bs for b in self.cap_blend]).astype(np.float32)
         if self.cap_kind == "auto" and duration < config.AUTO_MIN_SECONDS:
             return
         if len(clip) < 5 or np.isnan(clip).any(axis=(1, 2)).mean() > 0.3:
@@ -139,11 +155,13 @@ class App:
         if self.cap_kind == "auto":  # look like a fixed push-to-talk window again
             fps = len(clip) / max(duration, 1e-3)
             clip = pad_to_length(clip, int(round(config.RECORD_SECONDS * fps)))
-        probs, _ = self.runtime.predict_clip(clip)
+            if blend is not None:
+                blend = pad_to_length(blend, len(clip))
+        probs, _ = self.runtime.predict_clip(clip, blend)
         if probs is None:
             self.note = "Face not visible enough - please repeat."
             return
-        self.last_clip, self.learned_path = clip, None
+        self.last_clip, self.last_blend, self.learned_path = clip, blend, None
         d = decide(probs, self.runtime.label_map, self.phrases)
         self.decision = d
         top = ", ".join(f"{pid} {p:.2f}" for pid, p in d.candidates)
@@ -206,6 +224,7 @@ class App:
         from collect_data import append_metadata, remove_metadata
         if self.learned_path is not None:          # changed their mind about the same clip
             self.learned_path.unlink(missing_ok=True)
+            blendshape_path(self.learned_path).unlink(missing_ok=True)
             remove_metadata(self.learned_path.relative_to(config.DATA_DIR).as_posix())
         folder = config.RAW_DIR / self.args.speaker / pid
         folder.mkdir(parents=True, exist_ok=True)
@@ -213,6 +232,8 @@ class App:
         reps = [int(p.stem.split("_")[1]) for p in folder.glob(f"{session}_*.npy")]
         path = folder / f"{session}_{max(reps, default=0) + 1:02d}.npy"
         np.save(path, self.last_clip.astype(np.float32))
+        if self.last_blend is not None:
+            np.save(blendshape_path(path), self.last_blend)
         append_metadata({"file": path.relative_to(config.DATA_DIR).as_posix(), "speaker": self.args.speaker,
                          "session": session, "phrase_id": pid, "phrase_text": self.text(pid),
                          "frames": len(self.last_clip), "fps": "", "lighting": "live", "glasses": 0,
@@ -322,11 +343,14 @@ class App:
             self.alert = None
         elif key in (ord("f"), ord("F")) and not self.capturing and not self.pending:
             self.toggle_focus()
+        elif key in (ord("v"), ord("V")):
+            self.hud = not self.hud
         return True
 
     # --------------------------------------------------------- per-frame step
-    def step(self, pts, now):
+    def step(self, pts, now, blend=None):
         row = pts if pts is not None else NAN_ROW
+        blend = blend if pts is not None else None
         motion, mar = 0.0, 0.0
         if pts is not None:
             norm = normalise(pts[None])[0]
@@ -338,6 +362,7 @@ class App:
 
         if self.capturing:
             self.cap_points.append(row)
+            self.cap_blend.append(blend)
             elapsed = now - self.cap_start
             if self.cap_kind == "ptt":
                 if elapsed >= config.RECORD_SECONDS:
@@ -351,13 +376,13 @@ class App:
                         or elapsed >= config.AUTO_MAX_SECONDS:
                     self.finish_capture(now)
         elif self.mode == "auto" and not self.pending and now >= self.cooldown_until:
-            self.prebuffer.append(row)
+            self.prebuffer.append((row, blend))
             opening = mar > config.AUTO_MAR_THRESHOLD and motion > config.AUTO_MOTION_THRESHOLD / 2
             active = pts is not None and (motion > config.AUTO_MOTION_THRESHOLD or opening)
             self.active_run = self.active_run + 1 if active else 0
             if self.active_run >= config.AUTO_START_FRAMES:
                 self.active_run = 0
-                self.start_capture("auto", now, self.prebuffer)
+                self.start_capture("auto", now, list(self.prebuffer))
                 self.prebuffer.clear()
         self.resolve_llm(now)
         return mar, motion
@@ -377,10 +402,13 @@ class App:
             draw_text(canvas, "silent lips -> phrase -> their own voice", (230, 37), 0.55, GREY, 1)
             draw_text(canvas, f"Output: {self.speaker.label}", (W - 400, 37), 0.5, GREY, 1)
 
-        # video
-        view = frame.copy()
-        draw_lips(view, pts)
+        # video: face-mesh "hologram" view (V toggles) or the plain camera with lip contours
+        view = draw_face_hud(frame, self.mesh, pts) if self.hud else draw_lips(frame.copy(), pts)
         view = cv2.flip(view, 1)
+        if self.hud and self.mesh is not None:
+            label = f"{self.tracker_name}: {len(self.mesh)} points" + (
+                " + 52 muscle scores" if self.has_blend else "")
+            draw_text(view, label, (12, VH - (40 if self.mode == "auto" else 16)), 0.45, (150, 230, 90), 1)
         if pts is None:
             draw_text(view, "No face detected - face the camera, light from the front", (12, 30), 0.6, RED, 2)
         if self.brightness is not None and self.brightness < 50:
@@ -437,7 +465,7 @@ class App:
 
         draw_text(canvas, "SPACE capture  1/2/3 pick  ENTER speak  BKSP undo  C clear",
                   (PX, VY + VH - 26), 0.45, DIM, 1)
-        draw_text(canvas, "F focus  M mode  L LLM  A acknowledge alert  Q quit", (PX, VY + VH - 6), 0.45, DIM, 1)
+        draw_text(canvas, "F focus  V view  M mode  L LLM  A ack alert  Q quit", (PX, VY + VH - 6), 0.45, DIM, 1)
 
         # status bar
         cv2.rectangle(canvas, (0, H - 36), (W, H), (48, 44, 42), -1)
@@ -459,7 +487,9 @@ class App:
         make_window(WINDOW, W, H)
         failures = 0
         try:
-            with LipTracker() as tracker:
+            with make_tracker() as tracker:
+                self.tracker_name = tracker.name
+                print(f"Face tracking: {tracker.name}")
                 while True:
                     ok, frame = cap.read()
                     if not ok or frame is None:
@@ -474,7 +504,9 @@ class App:
                     self.brightness = float(frame[::8, ::8].mean())   # every 8th pixel: microseconds
                     now = time.perf_counter()
                     pts = tracker.process(frame)
-                    mar, motion = self.step(pts, now)
+                    self.mesh, blend = tracker.last_mesh, tracker.last_blendshapes
+                    self.has_blend = self.has_blend or blend is not None
+                    mar, motion = self.step(pts, now, blend)
                     cv2.imshow(WINDOW, self.render(frame, pts, mar, motion, now))
                     key = cv2.waitKey(1) & 0xFF
                     if cv2.getWindowProperty(WINDOW, cv2.WND_PROP_VISIBLE) < 1:

@@ -79,7 +79,7 @@ def check_camera(index, show):
     """Returns {"cam_fps", "brightness", "face_rate"} or None if the camera failed."""
     import cv2
     import numpy as np
-    from src.landmarks import LipTracker, draw_lips
+    from src.landmarks import draw_face_hud, draw_lips, make_tracker
     from src.utils import close_window, draw_text, make_window, open_camera
 
     cap = open_camera(index)
@@ -93,8 +93,9 @@ def check_camera(index, show):
     if show:
         make_window(window, 640, 480)
 
-    def preview(img, pts=None):
-        view = cv2.flip(draw_lips(img.copy(), pts), 1)
+    def preview(img, pts=None, mesh=None):
+        view = draw_face_hud(img, mesh, pts) if config.HUD_VIEW else draw_lips(img.copy(), pts)
+        view = cv2.flip(view, 1)
         draw_text(view, "Camera check: look at the screen", (14, 30), 0.7, (255, 255, 255), 2)
         cv2.imshow(window, view)
         cv2.waitKey(1)
@@ -114,7 +115,8 @@ def check_camera(index, show):
     frames = faces = 0
     track_time = 0.0
     start = time.perf_counter()
-    with LipTracker() as tracker:
+    with make_tracker() as tracker:
+        tracker_name = tracker.name
         while time.perf_counter() - start < 3.0:      # with face tracking (what the live app does)
             ok, frame = cap.read()
             if not ok or frame is None:
@@ -126,7 +128,7 @@ def check_camera(index, show):
                 faces += 1
                 track_time += time.perf_counter() - t0
             if show:
-                preview(frame, pts)
+                preview(frame, pts, tracker.last_mesh)
     h, w = (frame.shape[:2] if frames else (0, 0))
     cap.release()
     if show:
@@ -152,8 +154,10 @@ def check_camera(index, show):
                + (" (the picture is very dark)" if dark else ""))
     if faces:
         ms = track_time / faces * 1000
-        report("PASS" if ms < 45 else "WARN", "Face tracking speed",
-               f"{ms:.0f} ms per frame" + ("" if ms < 45 else " (slow CPU: close other apps, plug in the charger)"))
+        limit = 70 if tracker_name == "Face Landmarker" else 45
+        report("PASS" if ms < limit else "WARN", f"Face tracking ({tracker_name})",
+               f"{ms:.0f} ms per frame" + ("" if ms < limit else " (slow CPU: close other apps, plug in the charger;"
+                                           " or set TRACKER = \"facemesh\" in config.py)"))
     return {"cam_fps": cam_fps, "brightness": brightness, "face_rate": rate}
 
 

@@ -20,6 +20,9 @@ WORK_DIR = Path(os.environ.get("SILENTSPEECH_WORKDIR", ROOT)).resolve()
 # --- Camera ----------------------------------------------------------------
 CAMERA_INDEX = 0
 FRAME_WIDTH, FRAME_HEIGHT = 640, 480
+TRACKER = "landmarker"        # "landmarker": 478-point mesh + 52 muscle scores (~40 ms/frame)
+                              # "facemesh":   468-point mesh only (~13 ms/frame, older model)
+HUD_VIEW = True               # face-mesh "hologram" view in the app and recorder (V toggles)
 
 # --- Clips and features ----------------------------------------------------
 RECORD_SECONDS = 2.5          # one push-to-talk / data-collection window

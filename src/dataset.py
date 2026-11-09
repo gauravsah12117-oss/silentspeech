@@ -75,6 +75,18 @@ def make_splits(clips, holdout_speaker=None, test_sessions=config.TEST_SESSIONS,
     return {"train": train, "val": val, "test": test, "unseen": unseen}
 
 
+def blendshape_path(clip_path):
+    """Sidecar file with the clip's 52 blendshape scores per frame: <session>_<rep>.bs.npy"""
+    clip_path = Path(clip_path)
+    return clip_path.with_name(clip_path.stem + ".bs.npy")
+
+
+def load_blendshapes(clip_path):
+    """(T, 52) blendshape scores for a clip (NaN where the face was lost), or None."""
+    path = blendshape_path(clip_path)
+    return np.load(path) if path.exists() else None
+
+
 def load_positions(clips):
     """Load and normalise clips. Returns (positions list, kept clips)."""
     positions, kept = [], []

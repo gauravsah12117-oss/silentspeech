@@ -26,8 +26,10 @@ from datetime import datetime
 import numpy as np
 
 import config
+from src.dataset import blendshape_path
 from src.features import check_clip
-from src.landmarks import N_POINTS, LipTracker, draw_lips
+from src.landmarks import (BLENDSHAPE_NAMES, LANDMARK_IDS, N_POINTS, draw_face_hud, draw_lips,
+                           make_tracker)
 from src.utils import close_window, draw_text, load_phrases, make_window, open_camera
 
 WINDOW = "SilentSpeech - recorder"
@@ -98,8 +100,12 @@ class Recorder:
 
     def show(self, frame, pts, lines, big=None, progress=None):
         cv2 = self.cv2
-        view = frame.copy()
-        draw_lips(view, pts)
+        mesh = self.tracker.last_mesh            # during capture: the latest the worker has done
+        if config.HUD_VIEW:
+            view = draw_face_hud(frame, mesh, pts if pts is not None
+                                 else (mesh[LANDMARK_IDS] if mesh is not None else None))
+        else:
+            view = draw_lips(frame.copy(), pts)
         view = cv2.flip(view, 1)  # mirror view feels natural; landmarks are taken from the unflipped frame
         if pts is None and progress is None:
             draw_text(view, "No face detected", (20, 40), 0.8, (0, 0, 255), 2)
@@ -159,11 +165,25 @@ class Recorder:
         return True
 
     def capture(self, seconds, lines, keep_frames=False):
-        """Record for `seconds`. Returns (clip (T, 42, 3), duration, frames).
+        """Record for `seconds`. Returns (clip (T, 42, 3), duration, frames, blendshapes (T, 52) or None).
 
-        Frames are grabbed first and landmarks found afterwards, so a slow
-        laptop still records at the camera's full frame rate.
+        Every frame the camera delivers is kept. The face analysis runs on a
+        second thread at the same time, so a slow laptop still records at the
+        camera's full frame rate and only the last few frames are left to
+        analyse when the recording ends.
         """
+        import queue
+        import threading
+
+        jobs, results = queue.Queue(), []
+
+        def work():
+            while (f := jobs.get()) is not None:
+                p = self.tracker.process(f)
+                results.append((p, self.tracker.last_blendshapes if p is not None else None))
+
+        worker = threading.Thread(target=work, name="face-analysis", daemon=True)
+        worker.start()
         frames = []
         start = time.perf_counter()
         while (elapsed := time.perf_counter() - start) < seconds:
@@ -171,14 +191,23 @@ class Recorder:
             if frame is None:
                 continue
             frames.append(frame)
+            jobs.put(frame)
             self.show(frame, None, lines, progress=elapsed / seconds)
         duration = time.perf_counter() - start
-        if frames:
-            self.show(frames[-1], None, lines[:1] + ["Checking the clip..."], progress=1.0)
+        jobs.put(None)
+        while worker.is_alive():           # keep the window responsive while the backlog finishes
+            if frames:
+                self.show(frames[-1], None, lines[:1] + [f"Checking the clip... {len(results)}/{len(frames)}"],
+                          progress=1.0)
+            worker.join(timeout=0.05)
         nan_row = np.full((N_POINTS, 3), np.nan, np.float32)
-        points = [p if (p := self.tracker.process(f)) is not None else nan_row for f in frames]
-        clip = np.stack(points).astype(np.float32) if points else np.zeros((0, N_POINTS, 3), np.float32)
-        return clip, duration, frames if keep_frames else []
+        clip = (np.stack([p if p is not None else nan_row for p, _ in results]).astype(np.float32)
+                if results else np.zeros((0, N_POINTS, 3), np.float32))
+        blend = None
+        if any(b is not None for _, b in results):
+            nan_bs = np.full(len(BLENDSHAPE_NAMES), np.nan, np.float32)
+            blend = np.stack([b if b is not None else nan_bs for _, b in results]).astype(np.float32)
+        return clip, duration, frames if keep_frames else [], blend
 
     def close(self):
         close_window(self.window)
@@ -218,7 +247,7 @@ def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=
     skipped = set()
     paused = not auto_advance
     rejected_in_a_row = 0
-    with LipTracker() as tracker:
+    with make_tracker() as tracker:
         rec = Recorder(cap, tracker)
         try:
             while True:
@@ -257,6 +286,7 @@ def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=
                     if saved_stack:
                         path = saved_stack.pop()
                         path.unlink(missing_ok=True)
+                        blendshape_path(path).unlink(missing_ok=True)
                         remove_metadata(path.relative_to(config.DATA_DIR).as_posix())
                         rec.notify(f"Deleted {path.parent.name}/{path.name} - record it again")
                     else:
@@ -266,8 +296,8 @@ def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=
                 # SPACE (or auto-advance): countdown, capture, check, save
                 if not rec.countdown(header, countdown):
                     break
-                clip, duration, frames = rec.capture(config.RECORD_SECONDS, header,
-                                                     keep_frames=config.SAVE_VIDEO)
+                clip, duration, frames, blend = rec.capture(config.RECORD_SECONDS, header,
+                                                            keep_frames=config.SAVE_VIDEO)
                 ok, reason, stats = check_clip(clip, duration)
                 if not ok:
                     rejected_in_a_row += 1
@@ -283,6 +313,8 @@ def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=
                 path = clip_dir(speaker, p["id"]) / f"{session}_{rep:02d}.npy"
                 path.parent.mkdir(parents=True, exist_ok=True)
                 np.save(path, clip)
+                if blend is not None:
+                    np.save(blendshape_path(path), blend)
                 append_metadata({
                     "file": path.relative_to(config.DATA_DIR).as_posix(), "speaker": speaker,
                     "session": session, "phrase_id": p["id"], "phrase_text": p["text"],

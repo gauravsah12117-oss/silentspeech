@@ -24,8 +24,9 @@ from pathlib import Path
 import numpy as np
 
 import config
-from src.dataset import scan_clips
+from src.dataset import blendshape_path, load_blendshapes, scan_clips
 from src.features import fill_missing, lip_motion, normalise, resample
+from src.landmarks import MOUTH_BLENDSHAPES
 
 N_FRAMES = 32          # frames per signature
 BAND = 8               # DTW warping window (frames)
@@ -33,7 +34,8 @@ TAU_MIN = 0.15         # softest allowed confidence temperature (relative margin
 REJECT_FACTOR = 2.0    # "none of these" beyond 2x the typical distance between phrases
 OUTLIER_FACTOR = 2.0   # a clip this much farther from its own phrase than usual is left out
 VELOCITY_WEIGHT = 2.0  # how much the speed of the lips counts next to their shape
-VERSION = 5            # bump to invalidate caches when the signature or scoring changes
+BLEND_WEIGHTS = (0.0, 0.5, 1.0, 2.0)   # muscle-score weights tried at calibration (0 = not used)
+VERSION = 6            # bump to invalidate caches when the signature or scoring changes
 
 
 # --- Signatures ----------------------------------------------------------------
@@ -82,6 +84,22 @@ def raw_signature(clip):
     return signature(normalise(filled))
 
 
+def blend_signature(blendshapes):
+    """(T, 52) Face Landmarker muscle scores -> (32, 28) mouth/jaw signature, or None.
+
+    Same treatment as the lip shape: resampled to 32 frames and the clip's
+    average removed, so it describes how the mouth muscles change.
+    """
+    if blendshapes is None:
+        return None
+    b = np.asarray(blendshapes, dtype=np.float32)[:, MOUTH_BLENDSHAPES]
+    filled = fill_missing(b[:, :, None])
+    if filled is None or len(filled) < 4:
+        return None
+    f = resample(filled[:, :, 0], N_FRAMES)
+    return (f - f.mean(0)).astype(np.float32)
+
+
 def dtw_distances(q, templates, band=BAND):
     """DTW distance from one sequence q (L, D) to each template (N, L, D)."""
     n, length, _ = templates.shape
@@ -113,14 +131,25 @@ def _class_scores(dist, labels, n_classes, k):
 class TemplateMatcher:
     kind = "templates"
 
-    def __init__(self, feats, durs, labels, label_map, params, report=None, name="templates"):
+    def __init__(self, feats, durs, labels, label_map, params, report=None, name="templates", bsfeats=None):
         self.feats = np.asarray(feats, np.float32)
         self.durs = np.asarray(durs, np.float32)
         self.labels = np.asarray(labels, np.int64)
         self.label_map = list(label_map)
-        self.params = dict(params)
+        self.params = {"blend_weight": 0.0, **dict(params)}
         self.report = report or {}
         self.name = name
+        self.bsfeats = None if bsfeats is None else np.asarray(bsfeats, np.float32)   # (N, 32, 28) or None
+
+    def _uses_blend(self):
+        return self.bsfeats is not None and self.params.get("blend_weight", 0) > 0
+
+    def _template_feats(self, blend_weight=None):
+        """Template signatures, with the muscle scores appended when they are used."""
+        w = self.params.get("blend_weight", 0) if blend_weight is None else blend_weight
+        if self.bsfeats is None or w <= 0:
+            return self.feats
+        return np.concatenate([self.feats, w * self.bsfeats], axis=2)
 
     # -- building -----------------------------------------------------------
 
@@ -133,13 +162,14 @@ class TemplateMatcher:
         nothing like the other examples of their phrase (a missed cue, a laugh,
         a turned head). Each phrase always keeps at least 2 examples.
         """
-        sigs, pids, names, motion = [], [], [], []
+        sigs, bsigs, pids, names, motion = [], [], [], [], []
         for c in clips:
             filled = fill_missing(np.load(c.path))
             if filled is None or len(filled) < 4:
                 continue
             pos = normalise(filled)
             sigs.append(signature(pos))
+            bsigs.append(blend_signature(load_blendshapes(c.path)))
             pids.append(c.phrase_id)
             names.append(f"{c.phrase_id} clip {c.session}_{c.rep:02d}")
             motion.append(lip_motion(pos))
@@ -155,8 +185,10 @@ class TemplateMatcher:
         feats = np.stack([sigs[i][0] for i in keep])
         durs = np.array([sigs[i][1] for i in keep], np.float32)
         labels = np.array([index[pids[i]] for i in keep])
+        # muscle scores only if every clip has them (clips from the older tracker don't)
+        bsfeats = np.stack([bsigs[i] for i in keep]) if all(bsigs[i] is not None for i in keep) else None
         m = cls(feats, durs, labels, label_map, {"T": 0.05, "k": 1, "dur_weight": 0.0, "reject": np.inf},
-                name=name)
+                name=name, bsfeats=bsfeats)
         if calibrate:
             m.calibrate(max_queries=max_queries, progress=progress)
         m.report["dropped"] = dropped
@@ -200,7 +232,8 @@ class TemplateMatcher:
         mask = np.isin(self.labels, [old[pid] for pid in keep_ids])
         new = {old[pid]: j for j, pid in enumerate(keep_ids)}
         m = TemplateMatcher(self.feats[mask], self.durs[mask], [new[c] for c in self.labels[mask]], keep_ids,
-                            self.params, name=f"{self.name}_focus{len(keep_ids)}")
+                            self.params, name=f"{self.name}_focus{len(keep_ids)}",
+                            bsfeats=None if self.bsfeats is None else self.bsfeats[mask])
         m.calibrate(progress=progress)
         return m
 
@@ -211,7 +244,8 @@ class TemplateMatcher:
         accuracy most. Returns [(phrase_id, accuracy of the set up to it)].
         """
         n = len(self.feats)
-        dist = np.stack([dtw_distances(self.feats[i], self.feats) for i in range(n)])
+        feats = self._template_feats()
+        dist = np.stack([dtw_distances(feats[i], feats) for i in range(n)])
         np.fill_diagonal(dist, np.inf)
 
         def accuracy(classes):
@@ -235,8 +269,12 @@ class TemplateMatcher:
         ranking += [(self.label_map[c], acc) for c, acc in reversed(removed)]
         return ranking
 
-    def _distances(self, feat, dur):
-        d = dtw_distances(feat, self.feats)
+    def _distances(self, feat, dur, bsfeat=None):
+        if self._uses_blend() and bsfeat is not None:
+            w = self.params["blend_weight"]
+            d = dtw_distances(np.concatenate([feat, w * bsfeat], axis=1), self._template_feats())
+        else:                      # no muscle scores for this clip: compare lip shapes only
+            d = dtw_distances(feat, self.feats)
         if self.params["dur_weight"]:
             d = d + self.params["dur_weight"] * np.abs(np.log(max(dur, 1e-3) / np.maximum(self.durs, 1e-3)))
         return d
@@ -253,31 +291,36 @@ class TemplateMatcher:
         queries = candidates if len(candidates) <= max_queries else np.sort(
             rng.choice(candidates, max_queries, replace=False))
 
-        dtw_rows, dur_rows = [], []
-        t0 = time.time()
-        for qi, i in enumerate(queries):
-            row = dtw_distances(self.feats[i], self.feats)
-            row[i] = np.inf
-            dtw_rows.append(row)
-            dur_rows.append(np.abs(np.log(max(self.durs[i], 1e-3) / np.maximum(self.durs, 1e-3))))
-            if progress and (qi % 20 == 0 or qi == len(queries) - 1):
-                progress(qi + 1, len(queries), time.time() - t0)
-        dtw_rows, dur_rows = np.array(dtw_rows), np.array(dur_rows)
         truth = self.labels[queries]
-        scale = float(np.median(dtw_rows[np.isfinite(dtw_rows)]))
-
-        def evaluate(k, w):
-            dist = dtw_rows + w * dur_rows
-            return np.array([_class_scores(d, self.labels, n_cls, k) for d in dist])
-
-        best = None
-        for k in (1, 2):
-            for lam in (0.0, 0.25, 0.5, 1.0):
-                scores = evaluate(k, lam * scale)
-                acc = float((scores.argmin(1) == truth).mean())
-                if best is None or acc > best[0] + 1e-9:
-                    best = (acc, k, lam * scale, scores)
-        acc, k, w, scores = best
+        dur_rows = np.array([np.abs(np.log(max(self.durs[i], 1e-3) / np.maximum(self.durs, 1e-3)))
+                             for i in queries])
+        # Muscle scores (when every clip has them) are tried at several weights;
+        # the weight that recognises this person's own clips best wins (0 = unused).
+        blend_weights = BLEND_WEIGHTS if self.bsfeats is not None else (0.0,)
+        t0, done, total = time.time(), 0, len(queries) * len(blend_weights)
+        best, accuracy_by_weight = None, {}
+        for bw in blend_weights:
+            feats = self._template_feats(bw)
+            dtw_rows = []
+            for i in queries:
+                row = dtw_distances(feats[i], feats)
+                row[i] = np.inf
+                dtw_rows.append(row)
+                done += 1
+                if progress and (done % 20 == 0 or done == total):
+                    progress(done, total, time.time() - t0)
+            dtw_rows = np.array(dtw_rows)
+            scale = float(np.median(dtw_rows[np.isfinite(dtw_rows)]))
+            for k in (1, 2):
+                for lam in (0.0, 0.25, 0.5, 1.0):
+                    dist = dtw_rows + lam * scale * dur_rows
+                    scores = np.array([_class_scores(d, self.labels, n_cls, k) for d in dist])
+                    acc = float((scores.argmin(1) == truth).mean())
+                    accuracy_by_weight[bw] = max(acc, accuracy_by_weight.get(bw, 0.0))
+                    if best is None or acc > best[0] + 1e-9:
+                        best = (acc, k, lam * scale, scores, bw)
+        acc, k, w, scores, bw = best
+        self.params["blend_weight"] = float(bw)
         rows = np.arange(len(truth))
         true_scores = scores[rows, truth]
         floor = 0.25 * float(np.median(true_scores[np.isfinite(true_scores)]))
@@ -312,7 +355,8 @@ class TemplateMatcher:
         # real use; never let the temperature collapse below a safe floor.
         tau = max(tau, TAU_MIN)
 
-        self.params = {"T": tau, "k": int(k), "dur_weight": float(w), "reject": reject, "floor": floor}
+        self.params = {"T": tau, "k": int(k), "dur_weight": float(w), "reject": reject, "floor": floor,
+                       "blend_weight": float(bw)}
         pred = scores.argmin(1)
         per_phrase, confusions = {}, {}
         for c, pid in enumerate(self.label_map):
@@ -325,7 +369,8 @@ class TemplateMatcher:
                 confusions[key] = confusions.get(key, 0) + 1
         self.report = {"loo_accuracy": acc, "n_queries": int(len(queries)), "n_templates": int(n),
                        "per_phrase": per_phrase,
-                       "confusions": dict(sorted(confusions.items(), key=lambda kv: -kv[1]))}
+                       "confusions": dict(sorted(confusions.items(), key=lambda kv: -kv[1])),
+                       "accuracy_by_blend_weight": {str(k_): v for k_, v in accuracy_by_weight.items()}}
 
     # -- prediction ---------------------------------------------------------
 
@@ -337,9 +382,10 @@ class TemplateMatcher:
         rel = (scores - best) / np.maximum(best, max(floor, 1e-9))
         return np.where(np.isfinite(rel), rel, 1e3)
 
-    def predict_signature(self, sig):
+    def predict_signature(self, sig, bsig=None):
         feat, dur = sig
-        scores = _class_scores(self._distances(feat, dur), self.labels, len(self.label_map), self.params["k"])
+        scores = _class_scores(self._distances(feat, dur, bsig), self.labels, len(self.label_map),
+                               self.params["k"])
         floor, tau = self.params.get("floor", 0.0), self.params["T"]
         logits = -self._relative(scores, floor)[0] / tau
         reject = self.params["reject"]
@@ -350,11 +396,11 @@ class TemplateMatcher:
         total = e.sum() + (np.exp(reject_logit - top) if np.isfinite(reject_logit) else 0.0)
         return (e / total).astype(np.float64)   # may sum to < 1: the rest is "none of these"
 
-    def predict_clip(self, clip):
-        """Raw clip (T, 42, 3) -> (probabilities, milliseconds), or (None, ms)."""
+    def predict_clip(self, clip, blendshapes=None):
+        """Raw clip (T, 42, 3) [+ (T, 52) muscle scores] -> (probabilities, ms), or (None, ms)."""
         t0 = time.perf_counter()
         sig = raw_signature(clip)
-        probs = None if sig is None else self.predict_signature(sig)
+        probs = None if sig is None else self.predict_signature(sig, blend_signature(blendshapes))
         return probs, (time.perf_counter() - t0) * 1000
 
     def predict_positions(self, positions):
@@ -364,17 +410,19 @@ class TemplateMatcher:
         acc = self.report.get("loo_accuracy")
         per = np.bincount(self.labels, minlength=len(self.label_map))
         est = f", calibration estimate {acc:.0%}" if acc is not None else ""
-        return (f"instant templates ({len(self.label_map)} phrases, "
+        muscles = " + facial muscle scores" if self._uses_blend() else ""
+        return (f"instant templates{muscles} ({len(self.label_map)} phrases, "
                 f"{per.min()}-{per.max()} clips each{est})")
 
     # -- cache --------------------------------------------------------------
 
     def save(self, path, signature_hash):
         path.parent.mkdir(parents=True, exist_ok=True)
+        extra = {} if self.bsfeats is None else {"bsfeats": self.bsfeats}
         np.savez(path, feats=self.feats, durs=self.durs, labels=self.labels,
                  label_map=np.array(self.label_map), params=np.array(json.dumps(self.params)),
                  report=np.array(json.dumps(self.report)), signature=np.array(signature_hash),
-                 version=np.array(VERSION))
+                 version=np.array(VERSION), **extra)
 
     @classmethod
     def load(cls, path, name="templates"):
@@ -382,7 +430,8 @@ class TemplateMatcher:
             if int(z["version"]) != VERSION:
                 return None, None
             m = cls(z["feats"], z["durs"], z["labels"], [str(s) for s in z["label_map"]],
-                    json.loads(str(z["params"])), json.loads(str(z["report"])), name=name)
+                    json.loads(str(z["params"])), json.loads(str(z["report"])), name=name,
+                    bsfeats=z["bsfeats"] if "bsfeats" in z.files else None)
             return m, str(z["signature"])
 
 
@@ -391,6 +440,9 @@ def clips_hash(clips):
     for c in sorted(clips, key=lambda c: str(c.path)):
         st = c.path.stat()
         h.update(f"{c.path.as_posix()}|{st.st_size}|{st.st_mtime_ns}".encode())
+        bs = blendshape_path(c.path)
+        if bs.exists():
+            h.update(f"bs|{bs.stat().st_size}|{bs.stat().st_mtime_ns}".encode())
     return h.hexdigest()
 
 
@@ -413,5 +465,18 @@ def for_speaker(speaker, phrase_ids, raw_dir=None, model_dir=None, rebuild=False
         if m is not None and cached_sig == sig:
             return m
     m = TemplateMatcher.from_clips(clips, phrase_ids, progress=progress, name=f"templates_{speaker}")
+    # Older clips have no muscle scores. Once every phrase has 3+ newer clips that
+    # do, also try those alone with muscle scores, and keep whichever recognises
+    # this person's clips better.
+    with_scores = [c for c in clips if blendshape_path(c.path).exists()]
+    if m.bsfeats is None and with_scores:
+        per_phrase = {pid: sum(c.phrase_id == pid for c in with_scores) for pid in m.label_map}
+        if min(per_phrase.values()) >= 3:
+            alt = TemplateMatcher.from_clips(with_scores, phrase_ids, progress=progress,
+                                             name=f"templates_{speaker}")
+            better = (alt.report.get("loo_accuracy") or 0) > (m.report.get("loo_accuracy") or 0)
+            if alt.label_map == m.label_map and alt._uses_blend() and better:
+                alt.report["chosen_over"] = {"all_clips_without_muscle_scores": m.report.get("loo_accuracy")}
+                m = alt
     m.save(path, sig)
     return m

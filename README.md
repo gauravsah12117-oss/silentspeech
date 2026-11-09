@@ -101,6 +101,7 @@ Everything runs on a normal laptop CPU. No special sensors, no GPU, no cost.
 | Feature | What it does |
 |---|---|
 | **Real-time silent lip reading** | Recognises 30–50 essential phrases from silent mouthing through a webcam. |
+| **Facial muscle analysis** | 478-point face mesh plus 52 learned muscle-movement scores per frame, shown live as a face-mesh view. |
 | **Own-voice output** | Speaks in the user's real recorded voice, or a clone of it, instead of a robotic voice. |
 | **Context-aware correction** | An LLM re-ranks the model's top guesses using the recent conversation. |
 | **Sentence builder** | Combines phrases ("I need water" + "Call my mother") into one message. |
@@ -161,7 +162,9 @@ flowchart LR
 
 ### 6.1 Face and lip tracking
 
-MediaPipe Face Mesh detects 468 3D facial landmarks per frame in real time on a CPU. We keep only what matters for lip reading: 20 outer-lip points, 20 inner-lip points, and 2 eye corners used for normalisation.
+SilentSpeech uses **MediaPipe Face Landmarker**. One neural network finds **478 3D facial landmarks** per frame, and a second outputs **52 blendshapes**: scores from 0 to 1 for facial muscle movements such as `jawOpen`, `mouthPucker`, `mouthFunnel`, `mouthPress`, `mouthRollLower` and `mouthSmile`. The 28 mouth and jaw scores describe *what the mouth is doing* rather than where points are. On a low-power laptop CPU it takes about 40 ms per frame; if the model can't be downloaded, the older MediaPipe Face Mesh (468 points, no blendshapes) is used instead (`TRACKER` in `config.py`).
+
+For lip reading we keep 20 outer-lip points, 20 inner-lip points, and 2 eye corners used for normalisation, plus the mouth and jaw blendshapes, which are saved next to each clip (`<session>_<rep>.bs.npy`). The full mesh drives the face-mesh view in the app.
 
 ```python
 LIPS_OUTER  = [61, 146, 91, 181, 84, 17, 314, 405, 321, 375,
@@ -237,7 +240,8 @@ The neural model needs hundreds of clips and a long training run (hours on a low
 1. Each calibration clip is reduced to a *signature*: the clip is resampled to 32 frames, its average mouth shape is subtracted (so it describes how the shape *changes*), and the smoothed speed of every point is added. On the first real calibration this scored 75% leave-one-out, against 35% for an earlier version that measured change from the "resting" lips at the start and end. Real users are often still moving at both ends. Clips where the lips barely moved, or that look unlike every other example of their phrase, are left out automatically.
 2. A new clip is compared with every stored signature. DTW lines the two up in time, so speaking faster or slower doesn't matter.
 3. The phrase whose examples are closest wins. Confidence comes from how clearly it beats the runner-up, relative to the distance, so a whole-session shift (new day, new light) doesn't destroy it.
-4. **Calibration:** each calibration clip is recognised from all the others (leave-one-out). That gives an accuracy estimate and sets the confidence scale so that average confidence equals measured accuracy. A clip far from every phrase (talking, laughing, a phrase not in the list) gets low confidence and is never spoken directly.
+4. **Facial muscle scores:** when clips have the 52 blendshapes, the mouth and jaw scores can be added to each frame. Calibration tries several weights (0, 0.5, 1, 2) on that person's own clips and keeps the most accurate, so they are used only if they help. Clips recorded before the Face Landmarker have no scores; once every phrase has 3 or more newer clips, the recogniser built from those (with scores) is compared with the one built from all clips (without), and the better one is kept.
+5. **Calibration:** each calibration clip is recognised from all the others (leave-one-out). That gives an accuracy estimate and sets the confidence scale so that average confidence equals measured accuracy. A clip far from every phrase (talking, laughing, a phrase not in the list) gets low confidence and is never spoken directly.
 
 The app uses the neural model when it has been trained or enrolled on that speaker, and the templates otherwise (`--recognizer` overrides). `evaluate.py --recognizer templates` reports the templates as a training-free baseline next to the neural model, which is a useful comparison for the results slide.
 
@@ -249,7 +253,7 @@ The app uses the neural model when it has been trained or enrolled on that speak
 |---|---|---|
 | Language | Python 3.10 / 3.11 / 3.12 | Best library support for AI and computer vision |
 | Webcam and video | OpenCV | Fast camera capture and on-screen display |
-| Face landmarks | MediaPipe Face Mesh | Accurate 468-point face tracking, runs in real time on a CPU |
+| Face landmarks | MediaPipe Face Landmarker (478 points + 52 blendshapes), Face Mesh as fallback | Accurate face tracking plus learned facial-muscle scores, real time on a CPU |
 | Deep learning | PyTorch | Flexible and widely used for research-style models |
 | Instant recogniser | DTW nearest neighbours in NumPy | Works from 4 clips per phrase, no training, ~15 ms per prediction |
 | Metrics and charts | scikit-learn, Matplotlib | Confusion matrices, F1 scores, training curves |
@@ -730,7 +734,7 @@ The app picks the recogniser automatically: the neural model if it was trained o
 
 ### What the screen shows
 
-- **Left:** live webcam feed with lip landmarks drawn on the mouth
+- **Left:** a face-mesh view of the webcam: dimmed video on a grid, the 478-point wireframe, glowing nodes and highlighted lips (**V** switches to the plain camera)
 - **Top right:** the predicted phrase, with confidence bars for the top 3 guesses
 - **Middle right:** the sentence being built
 - **Bottom:** status bar showing the mode, FPS, recogniser, LLM on/off, latency, and live MAR/motion values
@@ -751,6 +755,7 @@ The app picks the recogniser automatically: the neural model if it was trained o
 | L | Turn the LLM layer on or off |
 | A | Acknowledge an emergency alert |
 | F | Focus: use only your most reliable phrases (higher accuracy); F again for all phrases |
+| V | View: face-mesh view or plain camera |
 | Q | Quit |
 
 If no model has been trained yet, the app still opens in tracking-only mode, which is handy for checking the camera and lighting.
@@ -906,7 +911,7 @@ Being open about these limits in the presentation shows maturity and builds trus
 | Very low accuracy | Look-alike phrases, unbalanced data, or random splitting | Check the confusion matrix, rename confused phrases, balance clip counts, split by session |
 | Good test accuracy, poor live accuracy | Live conditions differ from recordings | Record an extra session in the demo venue's lighting, or run a quick enrolment there |
 | Auto mode starts too often or never | Thresholds don't suit this face or camera | Watch the MAR and motion values in the status bar and adjust `AUTO_MOTION_THRESHOLD` / `AUTO_MAR_THRESHOLD` |
-| App is laggy | High resolution or other heavy apps | Use 640×480, close the browser and other apps, and plug in the charger |
+| App is laggy | High resolution or other heavy apps | Use 640×480, close the browser and other apps, and plug in the charger. On a very slow CPU, press V for the plain view, or set `TRACKER = "facemesh"` in `config.py` (3× faster, no muscle scores) |
 | Training is very slow | Low-power CPU | Train on a free Colab GPU and copy `models/lipreader.pt` back |
 | No sound | Audio device or driver issue | Run `python check_setup.py`; on Linux, install `espeak-ng` for pyttsx3 |
 | LLM step is slow | Network delay | Lower `LLM_TIMEOUT_S`, use a local model via Ollama, or run with `--no-llm` |

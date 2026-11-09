@@ -174,8 +174,11 @@ class LipReaderRuntime:
         feats = np.stack([to_features(p, self.use_velocity, self.n_frames) for p in positions])
         return predict_proba(self.model, feats)
 
-    def predict_clip(self, clip):
-        """Raw clip (T, 42, 3) -> (probabilities, milliseconds), or (None, ms)."""
+    def predict_clip(self, clip, blendshapes=None):
+        """Raw clip (T, 42, 3) -> (probabilities, milliseconds), or (None, ms).
+
+        blendshapes is accepted for a common interface with the templates and ignored.
+        """
         t0 = time.perf_counter()
         feats = build_features(clip, self.use_velocity, self.n_frames)
         if feats is None:

@@ -97,6 +97,77 @@ class TestTemplates(unittest.TestCase):
         self.assertIsNone(for_speaker("nobody", PIDS, raw_dir=self.tmp / "raw", model_dir=models))
 
 
+class TestMuscleScores(unittest.TestCase):
+    """Blendshape (muscle score) sidecars: used only when they help this person's clips."""
+
+    def build(self, informative):
+        from src.dataset import blendshape_path
+        tmp = Path(tempfile.mkdtemp())
+        rng = np.random.default_rng(3)
+        for k, pid in enumerate(PIDS):
+            for rep in range(1, 5):
+                path = tmp / "raw" / "u2" / pid / f"1_{rep:02d}.npy"
+                path.parent.mkdir(parents=True, exist_ok=True)
+                # lip clips made deliberately hard to tell apart: every phrase uses the same pattern
+                clip = make_clip(phrase_pattern(0), SP, 2, rng)[0]
+                np.save(path, clip)
+                bs = rng.normal(0.2, 0.05, (len(clip), 52)).astype(np.float32)
+                if informative:      # the muscle scores carry the phrase: a different jaw/pucker rhythm each
+                    t = np.linspace(0, 1, len(clip))
+                    bs[:, 25] = 0.4 + 0.3 * np.sin(2 * np.pi * (k + 1) * t)       # jawOpen
+                    bs[:, 38] = 0.3 + 0.3 * np.cos(2 * np.pi * (k + 2) * t)       # mouthPucker
+                np.save(blendshape_path(path), bs)
+        return tmp, scan_clips(tmp / "raw")
+
+    def test_used_when_informative_and_survives_save_load(self):
+        from src.templates import cache_path
+        tmp, clips = self.build(informative=True)
+        try:
+            m = TemplateMatcher.from_clips(clips, PIDS, prune=False)
+            self.assertIsNotNone(m.bsfeats)
+            self.assertGreater(m.params["blend_weight"], 0)
+            self.assertIn("muscle", m.describe())
+            m.save(cache_path("u2", tmp), "sig")
+            m2, sig = TemplateMatcher.load(cache_path("u2", tmp))
+            self.assertEqual(sig, "sig")
+            np.testing.assert_allclose(m2.bsfeats, m.bsfeats)
+            from src.dataset import load_blendshapes
+            c = clips[0]
+            probs, _ = m2.predict_clip(np.load(c.path), load_blendshapes(c.path))
+            self.assertEqual(m2.label_map[int(np.argmax(probs))], c.phrase_id)
+            probs_no_bs, _ = m2.predict_clip(np.load(c.path))          # still works without them
+            self.assertEqual(len(probs_no_bs), len(PIDS))
+            focus = m2.restrict(PIDS[:3])
+            self.assertEqual(focus.bsfeats.shape[0], len(focus.labels))
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_not_used_when_they_are_noise(self):
+        tmp, clips = self.build(informative=False)
+        try:
+            m = TemplateMatcher.from_clips(clips, PIDS, prune=False)
+            acc = m.report["accuracy_by_blend_weight"]
+            self.assertLessEqual(acc[str(m.params["blend_weight"])], max(acc.values()))
+            self.assertEqual(acc[str(m.params["blend_weight"])], max(acc.values()))   # picked the best
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestFaceHud(unittest.TestCase):
+    def test_draws_mesh_view(self):
+        import importlib.util
+        if not (importlib.util.find_spec("cv2") and importlib.util.find_spec("mediapipe")):
+            self.skipTest("opencv/mediapipe not installed")   # the drawing uses mediapipe's mesh connections
+        from src.landmarks import draw_face_hud
+        frame = np.full((480, 640, 3), 90, np.uint8)
+        rng = np.random.default_rng(0)
+        mesh = np.column_stack([rng.uniform(200, 440, 478), rng.uniform(120, 400, 478), np.zeros(478)])
+        out = draw_face_hud(frame, mesh.astype(np.float32), mesh[:42].astype(np.float32))
+        self.assertEqual(out.shape, frame.shape)
+        self.assertFalse(np.array_equal(out, frame))
+        self.assertEqual(draw_face_hud(frame, None).shape, frame.shape)    # no face: grid only
+
+
 class TestVoiceCleanup(unittest.TestCase):
     def test_trims_silence_and_levels(self):
         sr = 16000
