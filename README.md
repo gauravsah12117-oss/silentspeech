@@ -349,12 +349,15 @@ python check_setup.py
 
 ```bash
 python -m unittest discover -s tests
-set SILENTSPEECH_WORKDIR=%TEMP%\ss_synthetic        # macOS/Linux: export SILENTSPEECH_WORKDIR=/tmp/ss_synthetic
+$env:SILENTSPEECH_WORKDIR = "$env:TEMP\ss_synthetic"   # Windows PowerShell (VS Code's default terminal)
+# export SILENTSPEECH_WORKDIR=/tmp/ss_synthetic        # macOS / Linux
 python tools/make_synthetic_data.py --speakers 4 --phrases 12 --reps 20
 python train.py --epochs 30
 python evaluate.py --split test
-set SILENTSPEECH_WORKDIR=                           # macOS/Linux: unset SILENTSPEECH_WORKDIR
+Remove-Item Env:SILENTSPEECH_WORKDIR                   # macOS / Linux: unset SILENTSPEECH_WORKDIR
 ```
+
+The generator refuses to run unless `SILENTSPEECH_WORKDIR` is set, so fake clips can never end up in your real `data/` folder.
 
 ---
 

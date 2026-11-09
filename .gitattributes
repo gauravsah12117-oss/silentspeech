@@ -1,0 +1,6 @@
+# Keep line endings consistent between Windows and macOS/Linux teammates
+* text=auto
+*.png binary
+*.wav binary
+*.npy binary
+*.pt binary

@@ -1,6 +1,6 @@
 """Generate a fake landmark dataset to smoke-test the pipeline without a webcam.
 
-    set SILENTSPEECH_WORKDIR=C:\\temp\\ss_synthetic          (Windows)
+    $env:SILENTSPEECH_WORKDIR = "$env:TEMP\\ss_synthetic"    (Windows PowerShell)
     export SILENTSPEECH_WORKDIR=/tmp/ss_synthetic            (macOS / Linux)
     python tools/make_synthetic_data.py --speakers 4 --phrases 12 --reps 20
     python train.py --epochs 30 && python evaluate.py --split test
@@ -14,6 +14,7 @@ that already holds real recordings.
 """
 import argparse
 import csv
+import os
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -90,6 +91,11 @@ def main():
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
+    if not os.environ.get("SILENTSPEECH_WORKDIR"):
+        sys.exit("Set SILENTSPEECH_WORKDIR to an empty folder first, so fake clips never mix with real data:\n"
+                 '  PowerShell:    $env:SILENTSPEECH_WORKDIR = "$env:TEMP\\ss_synthetic"\n'
+                 "  Command Prompt: set SILENTSPEECH_WORKDIR=%TEMP%\\ss_synthetic\n"
+                 "  macOS / Linux: export SILENTSPEECH_WORKDIR=/tmp/ss_synthetic")
     raw = config.RAW_DIR
     real = [p.name for p in raw.glob("*") if p.is_dir() and not p.name.startswith("syn")] if raw.exists() else []
     if real:
