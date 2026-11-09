@@ -95,6 +95,17 @@ def open_camera(index=None, width=None, height=None):
     return cap
 
 
+def close_window(name):
+    """Close an OpenCV window, even if the user already closed it with its X button."""
+    import cv2
+
+    try:
+        cv2.destroyWindow(name)
+        cv2.waitKey(1)
+    except cv2.error:
+        pass
+
+
 def make_window(name, width, height):
     """A resizable OpenCV window that opens on top of the console."""
     import cv2

@@ -24,7 +24,7 @@ import numpy as np
 
 import config
 from src.speaker import mark_recorded, trim_and_level, voice_dir
-from src.utils import draw_text, load_phrases, make_window, wrap_text
+from src.utils import close_window, draw_text, load_phrases, make_window, wrap_text
 
 WINDOW = "SilentSpeech - record your voice"
 W, H = 800, 330
@@ -131,7 +131,7 @@ class VoiceRecorder:
         self.sd.wait()
 
     def close(self):
-        self.cv2.destroyWindow(WINDOW)
+        close_window(WINDOW)
 
 
 def record_phrase_voices(speaker, phrases, redo=False):

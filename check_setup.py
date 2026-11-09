@@ -80,7 +80,7 @@ def check_camera(index, show):
     import cv2
     import numpy as np
     from src.landmarks import LipTracker, draw_lips
-    from src.utils import draw_text, make_window, open_camera
+    from src.utils import close_window, draw_text, make_window, open_camera
 
     cap = open_camera(index)
     if cap is None:
@@ -130,8 +130,7 @@ def check_camera(index, show):
     h, w = (frame.shape[:2] if frames else (0, 0))
     cap.release()
     if show:
-        cv2.destroyWindow(window)
-        cv2.waitKey(1)
+        close_window(window)
     if frames == 0:
         report("FAIL", "Webcam", "opened but returned no frames (is another app using the camera?)")
         return None

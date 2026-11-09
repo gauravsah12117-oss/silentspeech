@@ -38,7 +38,7 @@ EMERGENCY_MIN = 0.40          # any emergency phrase at or above this raises an 
 
 # --- LLM correction layer --------------------------------------------------
 USE_LLM = True
-LLM_PROVIDER = "claude"       # claude | gemini | openai | ollama
+LLM_PROVIDER = "claude"       # claude | gemini | openai | groq | ollama (.env LLM_PROVIDER overrides)
 LLM_TIMEOUT_S = 2.0           # fall back to the top-1 prediction if slower
 LLM_CONTEXT_PHRASES = 5       # how many recent phrases are sent as context
 # Small, fast models suit a 2-second budget. Providers retire model names over
@@ -47,12 +47,14 @@ LLM_MODELS = {
     "claude": "claude-haiku-5-5",
     "gemini": "gemini-2.5-flash",
     "openai": "gpt-4.1-mini",
+    "groq": "qwen/qwen3.8-27b",      # ~0.25 s per answer (tested 2026-11-10)
     "ollama": "llama3.2:3b",
 }
 OLLAMA_URL = "http://localhost:11434"
 LLM_ENDPOINTS = {
     "claude": "https://api.anthropic.com/v1/messages",
     "openai": "https://api.openai.com/v1/chat/completions",
+    "groq": "https://api.groq.com/openai/v1/chat/completions",
     "gemini": "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
 }
 

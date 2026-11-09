@@ -253,7 +253,7 @@ The app uses the neural model when it has been trained or enrolled on that speak
 | Deep learning | PyTorch | Flexible and widely used for research-style models |
 | Instant recogniser | DTW nearest neighbours in NumPy | Works from 4 clips per phrase, no training, ~15 ms per prediction |
 | Metrics and charts | scikit-learn, Matplotlib | Confusion matrices, F1 scores, training curves |
-| LLM (optional) | Claude, Gemini or OpenAI API over plain HTTPS (no SDK needed), or a local model via Ollama | Context-based re-ranking of uncertain predictions |
+| LLM (optional) | Groq, Claude, Gemini or OpenAI API over plain HTTPS (no SDK needed), or a local model via Ollama | Context-based re-ranking of uncertain predictions; Groq answers in ~0.3 s |
 | Voice cloning | XTTS-v2 via the `coqui-tts` package, run on Google Colab's free GPU | Clones a voice from a short sample, supports 17 languages including Hindi |
 | Offline text-to-speech | pyttsx3 | Works without internet as a fallback voice |
 | Audio playback | sounddevice + soundfile | Plays pre-rendered WAV files with low delay |
@@ -424,7 +424,7 @@ All settings live in `config.py`, so nobody has to edit code to change behaviour
 | `CONF_MIN` | `0.40` | Below this, ask the user to repeat |
 | `EMERGENCY_MIN` | `0.40` | Any emergency phrase above this raises an alert |
 | `USE_LLM` | `True` | Turn the LLM correction layer on or off |
-| `LLM_PROVIDER` | `"claude"` | `claude`, `gemini`, `openai` or `ollama` |
+| `LLM_PROVIDER` | `"claude"` | `claude`, `gemini`, `openai`, `groq` or `ollama` (`LLM_PROVIDER` in `.env` overrides it for one laptop) |
 | `LLM_MODELS` | small, fast model per provider | Change if a provider retires a model name |
 | `LLM_TIMEOUT_S` | `2.0` | Fall back to the top-1 prediction if the LLM is slow |
 | `VOICE_MODE` | `"cloned"` | `cloned` (pre-rendered clips) or `default` (pyttsx3) |
@@ -433,7 +433,7 @@ All settings live in `config.py`, so nobody has to edit code to change behaviour
 | `AUTO_*` | see file | Auto-mode start/stop thresholds; the app shows live MAR and motion values to tune them |
 | `AUGMENT` | see file | Augmentation ranges; set one to 0 to switch it off |
 
-The `.env` file holds secrets only, for example `LLM_API_KEY=your-key-here`.
+The `.env` file holds secrets and per-laptop choices, for example `LLM_PROVIDER=groq` and `GROQ_API_KEY=...` (see `.env.example`). Use the provider-specific key name, so a key can only ever be sent to its own provider.
 
 ---
 
@@ -792,6 +792,8 @@ Reply with JSON only: {"choice": "<phrase_id>", "reason": "<one short sentence>"
 ### Privacy
 
 The LLM receives only phrase text and probabilities, never images, video or landmarks. For a fully private setup, run a small local model with Ollama and set `LLM_PROVIDER="ollama"`. Test your provider with `python check_setup.py --llm-ping`.
+
+**Groq (fast, free tier):** put `LLM_PROVIDER=groq` and `GROQ_API_KEY=...` in `.env`. On 2026-11-10, `qwen/qwen3.8-27b` (reasoning off) answered in about 0.25–0.45 s. Providers retire model names often; on Groq the app switches automatically to an available chat model if the configured one disappears.
 
 ---
 

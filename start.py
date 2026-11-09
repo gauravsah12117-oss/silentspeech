@@ -138,11 +138,14 @@ def clip_counts(speaker, phrase_ids):
 
 def record(speaker, session, reps, phrases, camera, title):
     from collect_data import record_phrases
-    print(f"\nA camera window opens for {len(phrases)} phrase(s), {reps} clips each. For every clip:")
+    each = "more clips" if isinstance(reps, dict) else "clips"
+    n = config.TRAIN_MORE_REPS if isinstance(reps, dict) else reps
+    print(f"\nA camera window opens for {len(phrases)} phrase(s), {n} {each} each. For every clip:")
     print("  - keep your lips gently closed,")
     print("  - when the red REC dot appears, SILENTLY mouth the phrase shown (no sound),")
     print("  - close your lips again. It moves on by itself.")
-    print("  Keys in that window: P pause, R redo the last clip, N skip a phrase, Q stop (progress is kept).")
+    print("  Keys in that window: P pause, R redo the last clip, N skip a phrase,")
+    print("  Q (or closing the window) stops - everything recorded so far is kept.")
     wait_enter("Press Enter to open the camera window...")
     record_phrases(speaker, session, reps, phrases, camera_index=camera, title=title,
                    auto_advance=True, order="round", countdown=config.QUICKSTART_COUNTDOWN)
@@ -220,8 +223,8 @@ def train_more(args, speaker, all_phrases):
     print(f"Right now your clips are recognised {before:.0%} of the time "
           f"({min(counts[p] for p in phrases)}-{max(counts[p] for p in phrases)} examples per phrase).")
     print("More examples is what makes it more accurate. Mouth each phrase clearly, the same way every time.")
-    done = {pid: len(existing_reps(speaker, pid, TRAIN_SESSION)) for pid in phrases}
-    record(speaker, TRAIN_SESSION, max(done.values()) + config.TRAIN_MORE_REPS, phrases, args.camera, "Training")
+    targets = {pid: len(existing_reps(speaker, pid, TRAIN_SESSION)) + config.TRAIN_MORE_REPS for pid in phrases}
+    record(speaker, TRAIN_SESSION, targets, phrases, args.camera, "Training")
     m = build_templates(speaker, list(phrases))
     report(m, all_phrases)
     after = m.report.get("loo_accuracy") or 0.0

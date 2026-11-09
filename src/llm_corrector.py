@@ -6,7 +6,7 @@ and the model's top-1 guess is used instead. The LLM never receives images,
 video or landmarks, only phrase text and probabilities.
 
 Providers are called over plain HTTPS with the standard library, so no
-vendor SDK is needed: claude, gemini, openai, or a local model via ollama.
+vendor SDK is needed: claude, gemini, openai, groq, or a local model via ollama.
 """
 import json
 import os
@@ -30,10 +30,14 @@ Choose the single most likely candidate given the context. You must choose
 one of the candidates above and must not invent new phrases.
 Reply with JSON only: {{"choice": "<phrase_id>", "reason": "<one short sentence>"}}"""
 
+# Groq chat models to fall back to (in order) if the configured one has been retired.
+GROQ_PREFERRED = ["qwen/qwen3", "openai/gpt-oss-120b", "openai/gpt-oss-20b", "llama-3.3", "llama"]
+
 _KEY_ENV = {
     "claude": ["LLM_API_KEY", "ANTHROPIC_API_KEY"],
     "gemini": ["LLM_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"],
     "openai": ["LLM_API_KEY", "OPENAI_API_KEY"],
+    "groq": ["LLM_API_KEY", "GROQ_API_KEY"],
     "ollama": [],
 }
 
@@ -72,10 +76,11 @@ def parse_choice(text, candidates, phrases):
 
 class LLMCorrector:
     def __init__(self, provider=None, model=None, timeout_s=None, api_key=None):
-        self.provider = (provider or config.LLM_PROVIDER).lower()
+        # .env may choose the provider and model for this laptop (LLM_PROVIDER, LLM_MODEL)
+        self.provider = (provider or os.environ.get("LLM_PROVIDER") or config.LLM_PROVIDER).lower()
         if self.provider not in _KEY_ENV:
             raise ValueError(f"Unknown LLM provider {self.provider!r}")
-        self.model = model or config.LLM_MODELS[self.provider]
+        self.model = model or (os.environ.get("LLM_MODEL") if not provider else None) or config.LLM_MODELS[self.provider]
         self.timeout_s = config.LLM_TIMEOUT_S if timeout_s is None else timeout_s
         self.api_key = api_key or next(
             (os.environ[k] for k in _KEY_ENV[self.provider] if os.environ.get(k)), None)
@@ -122,9 +127,43 @@ class LLMCorrector:
             return None
         return parse_choice(reply, candidates, phrases)
 
+    def _chat_body(self, prompt):
+        body = {"model": self.model, "max_completion_tokens": 120, "response_format": {"type": "json_object"},
+                "messages": [{"role": "user", "content": prompt}]}
+        if self.provider == "groq":
+            # Groq's current models "think" before answering; keep that short or off.
+            body["max_completion_tokens"] = 400
+            if "qwen" in self.model:
+                body["reasoning_effort"] = "none"
+            elif "gpt-oss" in self.model:
+                body["reasoning_effort"] = "low"
+        return body
+
+    def _switch_groq_model(self):
+        """Pick a chat model this key can use. Returns True if the model changed."""
+        if getattr(self, "_switched", False):
+            return False
+        self._switched = True
+        url = config.LLM_ENDPOINTS["groq"].replace("/chat/completions", "/models")
+        req = urllib.request.Request(url, headers={"Authorization": f"Bearer {self.api_key}",
+                                                   "User-Agent": "SilentSpeech/1.0"})
+        try:
+            with urllib.request.urlopen(req, timeout=self.timeout_s + 3) as resp:
+                ids = [m["id"] for m in json.loads(resp.read().decode()).get("data", [])]
+        except Exception:
+            return False
+        for prefix in GROQ_PREFERRED:
+            match = sorted(i for i in ids if i.startswith(prefix))
+            if match and match[-1] != self.model:
+                print(f"[llm] Groq model {self.model} is no longer available; using {match[-1]}")
+                self.model = match[-1]
+                return True
+        return False
+
     def _post(self, url, body, headers):
         req = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
-                                     headers={"Content-Type": "application/json", **headers})
+                                     headers={"Content-Type": "application/json",
+                                              "User-Agent": "SilentSpeech/1.0", **headers})
         try:
             with urllib.request.urlopen(req, timeout=self.timeout_s + 1) as resp:
                 return json.loads(resp.read().decode())
@@ -141,14 +180,17 @@ class LLMCorrector:
                 {"x-api-key": self.api_key, "anthropic-version": "2023-06-01"})
             return "".join(b.get("text", "") for b in data.get("content", []))
 
-        if self.provider == "openai":
-            data = self._post(
-                config.LLM_ENDPOINTS["openai"],
-                {"model": self.model, "max_completion_tokens": 120,
-                 "response_format": {"type": "json_object"},
-                 "messages": [{"role": "user", "content": prompt}]},
-                {"Authorization": f"Bearer {self.api_key}"})
-            return data["choices"][0]["message"]["content"]
+        if self.provider in ("openai", "groq"):     # Groq speaks the OpenAI format
+            try:
+                data = self._post(config.LLM_ENDPOINTS[self.provider], self._chat_body(prompt),
+                                  {"Authorization": f"Bearer {self.api_key}"})
+            except RuntimeError as e:
+                # Providers retire model names often; on Groq, switch to one that exists.
+                if self.provider != "groq" or "model_not_found" not in str(e) or not self._switch_groq_model():
+                    raise
+                data = self._post(config.LLM_ENDPOINTS[self.provider], self._chat_body(prompt),
+                                  {"Authorization": f"Bearer {self.api_key}"})
+            return data["choices"][0]["message"]["content"] or ""
 
         if self.provider == "gemini":
             data = self._post(

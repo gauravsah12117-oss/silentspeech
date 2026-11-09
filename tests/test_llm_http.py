@@ -21,6 +21,20 @@ CANDS = [("P10", 0.48), ("P28", 0.41), ("P11", 0.06)]
 
 
 class MockLLM(BaseHTTPRequestHandler):
+    def _send(self, code, payload):
+        data = json.dumps(payload).encode()
+        self.send_response(code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def do_GET(self):          # Groq-style model list
+        if self.path.endswith("/models"):
+            self._send(200, {"data": [{"id": "whisper-large-v3"}, {"id": "qwen/qwen3.8-27b"}]})
+        else:
+            self._send(404, {"error": "not found"})
+
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         self.server.requests.append((self.path, {k.lower(): v for k, v in self.headers.items()}, body))
@@ -32,10 +46,13 @@ class MockLLM(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(b'{"error": "invalid key"}')
             return
+        if body.get("model") == "retired-model":
+            self._send(404, {"error": {"message": "The model does not exist", "code": "model_not_found"}})
+            return
         text = json.dumps({"choice": "P99" if mode == "invent" else "P10", "reason": "pain, so the nurse"})
         if self.path.startswith("/v1/messages"):
             resp = {"content": [{"type": "text", "text": text}]}
-        elif self.path.startswith("/v1/chat/completions"):
+        elif "chat/completions" in self.path:
             resp = {"choices": [{"message": {"content": text}}]}
         elif ":generateContent" in self.path:
             resp = {"candidates": [{"content": {"parts": [{"text": text}]}}]}
@@ -66,6 +83,7 @@ class TestLLMHttp(unittest.TestCase):
         config.LLM_ENDPOINTS.update({
             "claude": base + "/v1/messages",
             "openai": base + "/v1/chat/completions",
+            "groq": base + "/openai/v1/chat/completions",
             "gemini": base + "/v1beta/models/{model}:generateContent",
         })
         config.OLLAMA_URL = base
@@ -91,6 +109,7 @@ class TestLLMHttp(unittest.TestCase):
 
     def test_each_provider_round_trip(self):
         expected_header = {"claude": ("x-api-key", "test-key"), "openai": ("authorization", "Bearer test-key"),
+                           "groq": ("authorization", "Bearer test-key"),
                            "gemini": ("x-goog-api-key", "test-key"), "ollama": None}
         for provider, header in expected_header.items():
             with self.subTest(provider=provider):
@@ -109,6 +128,17 @@ class TestLLMHttp(unittest.TestCase):
                     self.assertEqual(body["model"], config.LLM_MODELS["claude"])
                 if provider == "gemini":
                     self.assertIn(config.LLM_MODELS["gemini"], path)
+                if provider == "groq":
+                    self.assertEqual(body["reasoning_effort"], "none")     # qwen: answer without "thinking"
+
+    def test_groq_switches_away_from_a_retired_model(self):
+        llm = LLMCorrector("groq", model="retired-model", api_key="test-key", timeout_s=2.0)
+        try:
+            pid, _, source = llm.choose(CANDS, ["P09"], self.phrases)
+            self.assertEqual((pid, source), ("P10", "llm"))
+            self.assertEqual(llm.model, "qwen/qwen3.8-27b")
+        finally:
+            llm.close()
 
     def test_invented_phrase_falls_back_to_top1(self):
         self.server.mode = "invent"

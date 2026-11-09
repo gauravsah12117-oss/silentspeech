@@ -28,7 +28,7 @@ import numpy as np
 import config
 from src.features import check_clip
 from src.landmarks import N_POINTS, LipTracker, draw_lips
-from src.utils import draw_text, load_phrases, make_window, open_camera
+from src.utils import close_window, draw_text, load_phrases, make_window, open_camera
 
 WINDOW = "SilentSpeech - recorder"
 METADATA_FIELDS = ["file", "speaker", "session", "phrase_id", "phrase_text", "frames", "fps",
@@ -181,7 +181,7 @@ class Recorder:
         return clip, duration, frames if keep_frames else []
 
     def close(self):
-        self.cv2.destroyWindow(self.window)
+        close_window(self.window)
 
 
 def save_video(frames, fps, path):
@@ -213,6 +213,7 @@ def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=
         sys.exit("Could not open the webcam. Try --camera 1 and close Zoom/Teams. "
                  "Run python check_setup.py for details.")
     items = list(phrases.values())
+    target = (lambda pid: reps[pid]) if isinstance(reps, dict) else (lambda pid: reps)   # clips wanted per phrase
     saved_stack = []          # paths, so R can undo across phrases
     skipped = set()
     paused = not auto_advance
@@ -222,17 +223,18 @@ def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=
         try:
             while True:
                 counts = {p["id"]: len(existing_reps(speaker, p["id"], session)) for p in items}
-                todo = [i for i, p in enumerate(items) if p["id"] not in skipped and counts[p["id"]] < reps]
+                todo = [i for i, p in enumerate(items) if p["id"] not in skipped and counts[p["id"]] < target(p["id"])]
                 if not todo:
                     break
                 pi = min(todo, key=lambda i: (counts[items[i]["id"]], i)) if order == "round" else todo[0]
                 p = items[pi]
                 have = existing_reps(speaker, p["id"], session)
                 n_done = len(have)
-                done = sum(min(c, reps) for c in counts.values())
+                done = sum(min(c, target(pid)) for pid, c in counts.items())
+                total = sum(target(q["id"]) for q in items)
                 header = [p["text"],
-                          f"Clip {n_done + 1} of {reps} for this phrase ({SPEED_HINTS[n_done % 3]})  |  "
-                          f"{done}/{reps * len(items)} done  |  {title}: {speaker}, session {session}",
+                          f"Clip {n_done + 1} of {target(p['id'])} for this phrase ({SPEED_HINTS[n_done % 3]})  |  "
+                          f"{done}/{total} done  |  {title}: {speaker}, session {session}",
                           "Lips closed, then mouth it silently - the SAME way every time - then close them.",
                           "SPACE record   R redo last   N skip phrase   Q save and quit"
                           + ("   P pause" if auto_advance else "")]
@@ -291,7 +293,7 @@ def record_phrases(speaker, session, reps, phrases, lighting="unknown", glasses=
                     save_video(frames, stats["fps"],
                                config.VIDEO_DIR / speaker / p["id"] / f"{session}_{rep:02d}.mp4")
                 saved_stack.append(path)
-                rec.notify(f"Saved \"{p['text']}\" clip {len(have) + 1}/{reps} "
+                rec.notify(f"Saved \"{p['text']}\" clip {len(have) + 1}/{target(p['id'])} "
                            f"({stats['frames']} frames, {stats['fps']:.0f} FPS)")
         finally:
             rec.close()
