@@ -30,6 +30,7 @@ WINDOW = "SilentSpeech - record your voice"
 W, H = 800, 330
 MAX_PHRASE_S = 5.0
 MAX_SAMPLE_S = 90.0
+SPEECH_OVER_NOISE = 2.5    # speech must be ~8 dB above the room noise (works in noisy rooms too)
 SAMPLE_TEXT = (
     "Every morning I open the window and listen to the street waking up. A scooter rattles past, "
     "a dog barks twice, and somebody's radio plays an old song about the sea. I make a cup of tea, "
@@ -104,7 +105,7 @@ class VoiceRecorder:
             chunks.append(data[:, 0].copy())
             level[0] = float(np.sqrt((data[:, 0] ** 2).mean()))
 
-        threshold = max(4 * self.noise, 0.01)
+        threshold = max(SPEECH_OVER_NOISE * self.noise, 0.01)
         heard_at, loud_run = None, 0
         with self.sd.InputStream(samplerate=self.sr, channels=1, dtype="float32",
                                  blocksize=int(self.sr * 0.03), callback=callback):
@@ -160,7 +161,7 @@ def record_phrase_voices(speaker, phrases, redo=False):
             audio = rec.record(head, ["Recording... speak now. It stops by itself when you finish."], MAX_PHRASE_S)
             if audio is None:
                 break
-            clip = trim_and_level(audio, rec.sr, rec.noise)
+            clip = trim_and_level(audio, rec.sr, rec.noise, over_noise=SPEECH_OVER_NOISE)
             if clip is None:
                 end, quit_now = time.time() + 2.0, False
                 while time.time() < end and not quit_now:
@@ -207,7 +208,7 @@ def record_sample(speaker):
                            MAX_SAMPLE_S, auto_stop=False)
         if audio is None:
             return False
-        clip = trim_and_level(audio, rec.sr, rec.noise, margin_s=0.3)
+        clip = trim_and_level(audio, rec.sr, rec.noise, margin_s=0.3, over_noise=SPEECH_OVER_NOISE)
         if clip is None or len(clip) < rec.sr * 10:
             print("The sample is too short or silent; aim for 30-60 seconds of clear speech.")
             return False

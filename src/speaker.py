@@ -55,10 +55,10 @@ def tts_cache_dir():
 
 # --- Audio clean-up (used by record_voice.py) ----------------------------------
 
-def trim_and_level(audio, sr, noise_rms=0.0, target_rms=0.08, peak=0.95, margin_s=0.1):
+def trim_and_level(audio, sr, noise_rms=0.0, target_rms=0.08, peak=0.95, margin_s=0.1, over_noise=2.5):
     """Cut leading/trailing silence, remove DC, set a consistent loudness.
 
-    Returns None if there is no clear sound above the background noise.
+    Returns None if nothing rises clearly (over_noise times) above the room noise.
     """
     audio = np.asarray(audio, dtype=np.float32).reshape(-1)
     block = max(1, int(sr * 0.02))
@@ -66,9 +66,9 @@ def trim_and_level(audio, sr, noise_rms=0.0, target_rms=0.08, peak=0.95, margin_
     if n < 3:
         return None
     rms = np.sqrt((audio[: n * block].reshape(n, block) ** 2).mean(1))
-    if rms.max() < max(4 * noise_rms, 0.004):
+    if rms.max() < max(over_noise * noise_rms, 0.004):
         return None
-    threshold = max(3 * noise_rms, 0.1 * rms.max())
+    threshold = max(0.8 * over_noise * noise_rms, 0.1 * rms.max())
     voiced = np.where(rms > threshold)[0]
     a = max(0, voiced[0] * block - int(margin_s * sr))
     b = min(len(audio), (voiced[-1] + 1) * block + int(margin_s * sr))

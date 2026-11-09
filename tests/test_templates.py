@@ -90,6 +90,17 @@ class TestVoiceCleanup(unittest.TestCase):
         self.assertLessEqual(np.abs(clip).max(), 0.951)
         self.assertGreater(np.sqrt((clip ** 2).mean()), 0.05)
 
+    def test_speech_in_a_noisy_room_is_kept(self):
+        # Measured on the team laptop: room noise RMS ~0.03 (fan / mic gain).
+        sr, rng = 16000, np.random.default_rng(1)
+        speech = 0.14 * np.sin(2 * np.pi * 200 * np.arange(int(sr * 0.7)) / sr)   # RMS 0.1, ~3.3x the noise
+        audio = rng.normal(0, 0.03, int(sr * 2.0))
+        audio[int(sr * 0.6):int(sr * 0.6) + len(speech)] += speech
+        clip = trim_and_level(audio, sr, noise_rms=0.03)
+        self.assertIsNotNone(clip)
+        self.assertLess(len(clip) / sr, 1.3)                          # trimmed around the speech
+        self.assertIsNone(trim_and_level(rng.normal(0, 0.03, sr * 2), sr, noise_rms=0.03))
+
     def test_silence_is_rejected(self):
         self.assertIsNone(trim_and_level(np.random.default_rng(0).normal(0, 0.001, 16000), 16000, 0.001))
 
