@@ -34,6 +34,36 @@ FONT_FILES = {
               "/System/Library/Fonts/Supplemental/Devanagari Sangam MN.ttc"],
 }
 _fonts = {}
+# Colour picture symbols (AAC-style phrase icons). Only Segoe UI Emoji scales to any size;
+# elsewhere the icons are simply left out and the text stays.
+EMOJI_FONT = "C:/Windows/Fonts/seguiemj.ttf"
+
+
+def emoji_font(size):
+    key = ("emoji", size)
+    if key not in _fonts:
+        _fonts[key] = None
+        try:
+            from PIL import ImageFont
+            if os.path.exists(EMOJI_FONT):
+                _fonts[key] = ImageFont.truetype(EMOJI_FONT, size)
+        except (ImportError, OSError):
+            pass
+    return _fonts[key]
+
+
+# Picture symbol for a phrase without its own "icon" (e.g. your own phrases).
+ICON_FALLBACKS = {"emergency": "\U0001F198", "custom": "\u2B50", "needs": "\U0001F64B", "medical": "\U0001F3E5",
+                  "responses": "\U0001F4AC", "feelings": "\U0001F4AD", "family": "\U0001F46A",
+                  "social": "\U0001F44B", "requests": "\U0001F64B"}
+
+
+def phrase_icon(phrase):
+    """The phrase's picture symbol ("icon" in the phrase file), or one for its category."""
+    if not phrase:
+        return ""
+    key = "emergency" if phrase.get("emergency") else phrase.get("category")
+    return phrase.get("icon") or ICON_FALLBACKS.get(key, "\u2B50")
 
 
 def font(style, size):
@@ -98,6 +128,11 @@ class Painter:
         if text:
             self.items.append((str(text), xy, size, color, style, anchor))
 
+    def icon(self, symbol, xy, size=20, anchor="mm"):
+        """A colour picture symbol (emoji); skipped where no colour emoji font exists."""
+        if symbol and emoji_font(size) is not None:
+            self.items.append((symbol, xy, size, TEXT, "emoji", anchor))
+
     def flush(self, img):
         if not self.items:
             return img
@@ -107,7 +142,9 @@ class Painter:
             Image = None
         if Image is None or font("regular", 16) is None:
             import cv2
-            for text, (x, y), size, color, _, _ in self.items:     # plain fallback
+            for text, (x, y), size, color, style, _ in self.items:     # plain fallback
+                if style == "emoji":
+                    continue
                 cv2.putText(img, text.encode("ascii", "replace").decode(), (int(x), int(y + size * 0.8)),
                             cv2.FONT_HERSHEY_SIMPLEX, size / 34, color, 1, cv2.LINE_AA)
             self.items = []
@@ -115,6 +152,9 @@ class Painter:
         pil = Image.fromarray(np.ascontiguousarray(img[:, :, ::-1]))
         draw = ImageDraw.Draw(pil)
         for text, xy, size, color, style, anchor in self.items:
+            if style == "emoji":
+                draw.text(xy, text, font=emoji_font(size), anchor=anchor, embedded_color=True)
+                continue
             draw.text(xy, text, font=_font_for(text, style, size), fill=tuple(int(c) for c in color[::-1]),
                       anchor=anchor)
         img[:] = np.asarray(pil)[:, :, ::-1]
@@ -143,18 +183,95 @@ def rounded_rect(img, x0, y0, x1, y1, r, color, thickness=-1):
 
 
 def card(img, painter, x0, y0, x1, y1, title=None, edge=CARD_EDGE, fill=CARD):
+    import cv2
     rounded_rect(img, x0, y0, x1, y1, 10, fill)
     rounded_rect(img, x0, y0, x1, y1, 10, edge, 1)
+    cv2.line(img, (int(x0) + 10, int(y0) + 1), (int(x1) - 10, int(y0) + 1), (84, 76, 70), 1)   # soft top light
     if title:
         painter.text(title.upper(), (x0 + 14, y0 + 9), 12, DIM, "semibold")
 
 
-def bar(img, x0, y0, w, h, value, color, back=(62, 56, 52)):
+def _supersampled(img, x0, y0, x1, y1, draw, s=4):
+    """Draw on a 4x copy of img[y0:y1, x0:x1] and scale it back down: smooth curves on any CPU."""
     import cv2
-    cv2.rectangle(img, (int(x0), int(y0)), (int(x0 + w), int(y0 + h)), back, -1)
+    patch = img[y0:y1, x0:x1]
+    big = cv2.resize(patch, ((x1 - x0) * s, (y1 - y0) * s), interpolation=cv2.INTER_NEAREST)
+    draw(big, s)
+    img[y0:y1, x0:x1] = cv2.resize(big, (x1 - x0, y1 - y0), interpolation=cv2.INTER_AREA)
+    return img
+
+
+def ring_gauge(img, cx, cy, r, value, color, thickness=5, back=(62, 56, 52)):
+    """A circular gauge filled clockwise from the top (value 0..1)."""
+    import cv2
+
+    def draw(big, s):
+        c, R = (int((cx - x0) * s), int((cy - y0) * s)), int(r * s)
+        cv2.circle(big, c, R, back, thickness * s, cv2.LINE_AA)
+        end = -90 + 360 * float(np.clip(value, 0, 1))
+        if end > -90:
+            cv2.ellipse(big, c, (R, R), 0, -90, end, color, thickness * s, cv2.LINE_AA)
+
+    x0, y0 = int(cx - r - thickness), int(cy - r - thickness)
+    return _supersampled(img, x0, y0, int(cx + r + thickness + 1), int(cy + r + thickness + 1), draw)
+
+
+def logo(img, x, y, size):
+    """App mark: a rounded tile (teal to blue) with a mouth sending out sound waves."""
+    import cv2
+
+    def draw(big, s):
+        S = size * s
+        yy, xx = np.mgrid[0:S, 0:S]
+        t = ((xx + yy) / (2.0 * S))[..., None]
+        grad = (np.array(ACCENT) * (1 - t) + np.array((225, 120, 85)) * t).astype(np.uint8)
+        mask = np.zeros((S, S), np.uint8)
+        rounded_rect(mask, 0, 0, S - 1, S - 1, int(0.26 * S), 255)
+        region = big[:S, :S]
+        region[mask > 0] = grad[mask > 0]
+        w = max(2, int(0.065 * S))
+        white = (250, 250, 250)
+        cv2.ellipse(region, (int(0.36 * S), int(0.5 * S)), (int(0.19 * S), int(0.12 * S)), 0, 0, 360, white, w,
+                    cv2.LINE_AA)
+        cv2.line(region, (int(0.19 * S), int(0.5 * S)), (int(0.53 * S), int(0.5 * S)), white, w, cv2.LINE_AA)
+        for rad in (0.2, 0.32):
+            cv2.ellipse(region, (int(0.56 * S), int(0.5 * S)), (int(rad * S), int(rad * S)), 0, -38, 38, white,
+                        w, cv2.LINE_AA)
+
+    return _supersampled(img, int(x), int(y), int(x + size), int(y + size), draw)
+
+
+def badge(img, painter, x_right, cy, text, color):
+    """A pill with a dot and a label, right-aligned at x_right. Returns its left edge."""
+    import cv2
+    tw = text_width(text, 11, "bold")
+    x0 = int(x_right - tw - 28)
+    rounded_rect(img, x0, cy - 10, x_right, cy + 10, 10, _mix(color, CARD, 0.22))
+    cv2.circle(img, (x0 + 11, cy), 4, color, -1, cv2.LINE_AA)
+    painter.text(text, (x0 + 19, cy), 11, color, "bold", "lm")
+    return x0
+
+
+def keycap(img, painter, x_right, cy, key, action, size=11):
+    """'[key] action' right-aligned at x_right, the key drawn as a keyboard key. Returns the left edge."""
+    aw = text_width(action, size)
+    kw = text_width(key, size - 1, "semibold") + 12
+    painter.text(action, (x_right, cy), size, DIM, "regular", "rm")
+    kx1 = int(x_right - aw - 5)
+    kx0 = int(kx1 - kw)
+    rounded_rect(img, kx0, cy - 8, kx1, cy + 8, 4, (60, 54, 50))
+    rounded_rect(img, kx0, cy - 8, kx1, cy + 8, 4, (92, 84, 78), 1)
+    painter.text(key, ((kx0 + kx1) / 2, cy), size - 1, TEXT, "semibold", "mm")
+    return kx0
+
+
+def bar(img, x0, y0, w, h, value, color, back=(62, 56, 52)):
+    """A rounded progress bar (value 0..1)."""
+    r = int(h // 2)
+    rounded_rect(img, x0, y0, x0 + w, y0 + h, r, back)
     fill = int(w * float(np.clip(value, 0, 1)))
-    if fill > 0:
-        cv2.rectangle(img, (int(x0), int(y0)), (int(x0 + fill), int(y0 + h)), color, -1)
+    if fill >= max(2, h // 2):                # a sliver is not drawn as a dot
+        rounded_rect(img, x0, y0, x0 + max(fill, h), y0 + h, r, color)
 
 
 def level_color(p, accept=0.70, minimum=0.40):

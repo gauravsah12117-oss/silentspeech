@@ -56,6 +56,9 @@ SENT = (672, 464, 1264, 560)
 HIST = (672, 568, 1264, 690)
 STATUS = (0, 694, W, H)
 MOUTH_CARD, EMO_CARD, MUSCLE_CARD = (0, 176), (186, 405), (415, 591)   # x ranges inside WIDGETS
+KEYS = [("SPACE", "speak"), ("1 2 3", "pick"), ("ENTER", "say all"), ("BKSP", "undo"), ("C", "clear"),
+        ("F", "focus"), ("E", "emotion"), ("V", "view"), ("M", "mode"), ("L", "context"), ("Q", "quit")]
+VIDEO_RADIUS = 12
 WHITE, GREY = (255, 255, 255), (185, 185, 185)
 GREEN, AMBER, RED = (90, 200, 90), (40, 170, 250), (60, 60, 230)
 NAN_ROW = np.full((N_POINTS, 3), np.nan, np.float32)
@@ -111,7 +114,7 @@ class App:
         self.options = None            # candidates waiting for 1/2/3
         self.pending = None            # LLM call in flight
         self.last_committed = None     # (phrase_id, candidates) for corrections
-        self.note = "Press SPACE and mouth a phrase." if self.mode == "ptt" else "Auto mode: just mouth a phrase."
+        self.note = ""                 # the steps on the prediction card explain how to start
         self.alert = None
         self.sentence = []
         self.history = deque(maxlen=config.LLM_CONTEXT_PHRASES)
@@ -124,6 +127,7 @@ class App:
         self.last_blend_live = None
         self.tracker_name = ""
         self.cap_blend = []
+        self.mar_hist = deque(maxlen=150)       # (time, mouth opening) for the lip-signal trace
 
         # facial emotion and pain expression from the 52 muscle scores (E toggles)
         self.emotion = EmotionReader()
@@ -160,6 +164,10 @@ class App:
     # ------------------------------------------------------------------ text
     def text(self, pid):
         return self.phrases[pid]["text"]
+
+    def icon(self, pid):
+        """The phrase's picture symbol (AAC style), e.g. a water drop for "I need water"."""
+        return ui.phrase_icon(self.phrases.get(pid))
 
     # --------------------------------------------------------------- capture
     def start_capture(self, kind, now, seed=()):
@@ -493,6 +501,7 @@ class App:
             motion = frame_motion(self.prev_norm, norm) if self.prev_norm is not None else 0.0
             mar = mouth_aspect_ratio(pts)
             self.prev_norm = norm
+            self.mar_hist.append((now, mar))
         else:
             self.prev_norm = None
 
@@ -549,7 +558,7 @@ class App:
     def _candidate_rects(self):
         """Clickable rows of the prediction card, in window coordinates."""
         x0, y0, x1, _ = PRED
-        return [(x0 + 8, y0 + 76 + 32 * i, x1 - 8, y0 + 106 + 32 * i) for i in range(len(self._candidates()))]
+        return [(x0 + 8, y0 + 84 + 30 * i, x1 - 8, y0 + 110 + 30 * i) for i in range(len(self._candidates()))]
 
     def _headline(self, now):
         d = self.decision
@@ -563,7 +572,7 @@ class App:
             return self.text(self.sentence[-1]), ui.GREEN
         if d:
             return self.text(d.candidates[0][0]) + " ?", ui.MUTED
-        return "Press SPACE, then mouth a phrase", ui.DIM
+        return "Ready when you are", ui.TEXT
 
     def _votes(self):
         """How the deep model and the templates voted on the last clip (a second opinion)."""
@@ -586,8 +595,10 @@ class App:
             p.text("PAIN EXPRESSION  —  held for a few seconds, please check on them.   "
                    "Press A (or click here) to dismiss.", (24, 31), 21, ui.TEXT, "bold", "lm")
             return p.flush(img)
-        p.text("SilentSpeech", (20, 31), 28, ui.TEXT, "bold", "lm")
-        p.text("silent lips  ›  phrase  ›  their own voice", (214, 33), 15, ui.MUTED, "regular", "lm")
+        ui.logo(img, 16, 12, 38)
+        p.text("SilentSpeech", (64, 30), 26, ui.TEXT, "bold", "lm")
+        p.text("silent lips  ›  phrase  ›  their own voice", (80 + ui.text_width("SilentSpeech", 26, "bold"), 32),
+               14, ui.MUTED, "regular", "lm")
         chips = []
         if self.runtime is not None:
             acc = getattr(self.runtime, "report", {}).get("loo_accuracy")
@@ -608,27 +619,100 @@ class App:
             x -= tw + 44
         return p.flush(img)
 
+    def _state(self):
+        """What the app is doing right now (the badge on the prediction card)."""
+        if self.runtime is None:
+            return "TRACKING ONLY", ui.DIM
+        if self.capturing:
+            return "LISTENING", ui.RED
+        if self.pending:
+            return "THINKING", ui.AMBER
+        if self.options:
+            return "YOUR CHOICE", ui.AMBER
+        if self.last_committed and self.sentence:
+            return "SPOKEN", ui.GREEN
+        return "READY", ui.ACCENT
+
+    def _headline_icon(self):
+        if self.capturing or (not self.decision and not self.sentence):
+            return "\U0001F444"                  # lips
+        if self.options:
+            return "\U0001F914"                  # thinking face
+        if self.last_committed and self.sentence:
+            return self.icon(self.sentence[-1])
+        return self.icon(self.decision.candidates[0][0]) if self.decision else ""
+
+    def _ring(self):
+        """(fraction, colour, label) for the gauge beside the headline, or None."""
+        if self.capturing or not (self.decision or self.log):
+            return None
+        if self.last_committed and self.sentence and self.log and not (self.options or self.pending):
+            c = self.log[-1].get("confidence")
+            if c is None:                         # tapped, picked or corrected: the user chose it
+                return 1.0, ui.GREEN, "you"
+            return c, ui.level_color(c, config.CONF_ACCEPT, config.CONF_MIN), f"{c:.0%}"
+        if self.decision:
+            c = self.decision.candidates[0][1]
+            return c, ui.level_color(c, config.CONF_ACCEPT, config.CONF_MIN), f"{c:.0%}"
+        return None
+
+    def _draw_steps(self, img, p, y):
+        """Three steps for a first-time user (or a judge): how to use it, at a glance."""
+        if self.mode == "auto":
+            first = ("\U0001F440", "Face the camera", "auto mode is on")
+            second = ("\U0001F444", "Mouth a phrase", "it starts by itself")
+        else:
+            first = ("⌨", "Press SPACE", "it starts listening")
+            second = ("\U0001F444", "Mouth a phrase", "silently, about 2 s")
+        voice = "in your own voice" if "own" in self.speaker.label else "out loud"
+        steps = [first, second, ("\U0001F50A", "Hear it spoken", voice)]
+        bw, gap = 172, 24
+        for k, (icon, title, sub) in enumerate(steps):
+            x = 16 + k * (bw + gap)
+            ui.rounded_rect(img, x, y, x + bw, y + 52, 10, (52, 46, 42))
+            p.icon(icon, (x + 23, y + 26), 22)
+            p.text(title, (x + 44, y + 18), 14, ui.TEXT, "semibold", "lm")
+            p.text(sub, (x + 44, y + 36), 11, ui.MUTED, "regular", "lm")
+            if k < len(steps) - 1:
+                p.text("›", (x + bw + gap / 2, y + 25), 22, ui.DIM, "regular", "mm")
+
     def _render_prediction(self, now):
         img, p = self._blank(PRED), ui.Painter()
         w, h = PRED[2] - PRED[0], PRED[3] - PRED[1]
-        ui.card(img, p, 0, 0, w - 1, h - 1, "Prediction")
+        state, scolor = self._state()
+        busy = state in ("LISTENING", "THINKING", "YOUR CHOICE")
+        ui.card(img, p, 0, 0, w - 1, h - 1, "Prediction", edge=ui._mix(scolor, ui.CARD_EDGE, 0.6) if busy else ui.CARD_EDGE)
+        bx = ui.badge(img, p, w - 12, 16, state, scolor)
         votes = self._votes()
         if votes:
             label, vcolor = votes
-            p.text(ui.wrap(label, w - 150, 12, "regular", max_lines=1)[0], (w - 14, 15), 12, vcolor, "regular", "rm")
+            p.text(ui.wrap(label, bx - 130, 11, "regular", max_lines=1)[0], (bx - 10, 16), 11, vcolor, "regular", "rm")
         headline, color = self._headline(now)
-        p.text(ui.wrap(headline, w - 32, 28, "bold", max_lines=1)[0], (16, 30), 28, color, "bold")
+        ring = self._ring()
+        p.icon(self._headline_icon(), (34, 55), 30)
+        p.text(ui.wrap(headline, w - (140 if ring or self.capturing else 76), 25, "bold", max_lines=1)[0], (60, 55), 25,
+               color, "bold", "lm")
+        if ring:
+            value, rcolor, label = ring
+            ui.ring_gauge(img, w - 42, 55, 21, value, rcolor, 5)
+            p.text(label, (w - 42, 55), 11 if len(label) > 3 else 12, rcolor, "bold", "mm")
         for i, (pid, prob) in enumerate(self._candidates()):
-            y = 76 + 32 * i
-            ui.rounded_rect(img, 16, y + 2, 42, y + 26, 6, (70, 62, 56))
-            p.text(str(i + 1), (29, y + 14), 14, ui.TEXT, "bold", "mm")
-            p.text(ui.wrap(self.text(pid), w - 270, 17, "semibold", max_lines=1)[0], (54, y + 14), 17, ui.TEXT,
+            y = 84 + 30 * i
+            ui.rounded_rect(img, 16, y + 2, 40, y + 24, 6, (70, 62, 56))
+            p.text(str(i + 1), (28, y + 13), 13, ui.TEXT, "bold", "mm")
+            p.icon(self.icon(pid), (57, y + 13), 16)
+            p.text(ui.wrap(self.text(pid), w - 300, 16, "semibold", max_lines=1)[0], (72, y + 13), 16, ui.TEXT,
                    "semibold", "lm")
-            ui.bar(img, w - 200, y + 9, 130, 10, prob, ui.level_color(prob, config.CONF_ACCEPT, config.CONF_MIN))
-            p.text(f"{prob:.0%}", (w - 16, y + 14), 14, ui.MUTED, "regular", "rm")
+            ui.bar(img, w - 192, y + 9, 124, 8, prob, ui.level_color(prob, config.CONF_ACCEPT, config.CONF_MIN))
+            p.text(f"{prob:.0%}", (w - 16, y + 13), 13, ui.MUTED, "regular", "rm")
+        if self.capturing:
+            p.text("Silently mouth your phrase now", (16, 100), 17, ui.TEXT, "semibold", "lm")
+            p.text("keep your head still and your face in the light", (16, 124), 12, ui.MUTED, "regular", "lm")
+        elif not self._candidates():
+            self._draw_steps(img, p, 92)
         note_color = ui.AMBER if (self.pending or self.options) else ui.MUTED
-        for j, line in enumerate(ui.wrap(self.note, w - 32, 14, "regular", max_lines=2)):
-            p.text(line, (16, h - 42 + 18 * j), 14, note_color)
+        for j, line in enumerate(ui.wrap("" if self.capturing else self.note, w - 32, 13, "regular", max_lines=2)):
+            p.text(line, (16, h - 40 + 18 * j), 13, note_color)
         return p.flush(img)
 
     def _render_widgets_frame(self):
@@ -692,14 +776,34 @@ class App:
         img, p = self._blank(SENT), ui.Painter()
         w, h = SENT[2] - SENT[0], SENT[3] - SENT[1]
         ui.card(img, p, 0, 0, w - 1, h - 1, "Sentence")
-        p.text("ENTER says it all", (w - 14, 15), 12, ui.DIM, "regular", "rm")
-        if self.sentence:
-            text = ". ".join(self.text(pid) for pid in self.sentence) + "."
-            lines = ui.wrap(text, w - 32, 20, "semibold")[-2:]
-            for j, line in enumerate(lines):
-                p.text(line, (16, 32 + 26 * j), 20, ui.TEXT, "semibold")
-        else:
-            p.text("(empty) - phrases you say are collected here", (16, 40), 15, ui.DIM)
+        ui.keycap(img, p, w - 14, 16, "ENTER", "says it all")
+        if not self.sentence:
+            p.text("(empty) - phrases you say are collected here", (16, 44), 15, ui.DIM)
+            return p.flush(img)
+        # one chip per phrase, newest last; two rows, the oldest drop off when it is full
+        avail, gap = w - 32, 8
+        widths = [min(ui.text_width(self.text(pid), 15, "semibold"), avail - 60) + 44 for pid in self.sentence]
+        rows, used, r = [[], []], 0, 1
+        for i in range(len(self.sentence) - 1, -1, -1):
+            if rows[r] and used + widths[i] > avail:
+                r, used = r - 1, 0
+                if r < 0:
+                    break
+            rows[r].insert(0, i)
+            used += widths[i] + gap
+        rows = [row for row in rows if row]
+        for j, row in enumerate(rows):
+            x, cy = 16, 44 + 32 * j
+            for i in row:
+                pid, cw = self.sentence[i], widths[i]
+                newest = i == len(self.sentence) - 1
+                ui.rounded_rect(img, x, cy - 13, x + cw, cy + 13, 13, (60, 54, 49))
+                if newest:
+                    ui.rounded_rect(img, x, cy - 13, x + cw, cy + 13, 13, ui.ACCENT, 1)
+                p.icon(self.icon(pid), (x + 17, cy), 15)
+                p.text(ui.wrap(self.text(pid), cw - 44, 15, "semibold", max_lines=1)[0], (x + 32, cy), 15,
+                       ui.TEXT, "semibold", "lm")
+                x += cw + gap
         return p.flush(img)
 
     def _render_history(self):
@@ -714,7 +818,8 @@ class App:
         for j, e in enumerate(entries):
             y = 34 + 21 * j
             p.text(time.strftime("%H:%M", e["time"]), (16, y), 13, ui.DIM)
-            p.text(ui.wrap(self.text(e["pid"]), w - 250, 15, "semibold", max_lines=1)[0], (66, y - 1), 15,
+            p.icon(self.icon(e["pid"]), (75, y + 9), 14)
+            p.text(ui.wrap(self.text(e["pid"]), w - 290, 15, "semibold", max_lines=1)[0], (90, y - 1), 15,
                    ui.TEXT if j == 0 else ui.MUTED, "semibold")
             tag = SOURCE_LABEL.get(e["source"], e["source"])
             if e.get("confidence") is not None and e["source"] in ("lips", "llm", "fallback"):
@@ -753,15 +858,17 @@ class App:
             emergency = self.phrases[pid].get("emergency")
             fill = (55, 45, 88) if emergency else (58, 52, 47)
             ui.rounded_rect(img, x0, y0, x1, y1, 8, fill)
-            if pid in highlight:
-                color, number = highlight[pid]
-                ui.rounded_rect(img, x0, y0, x1, y1, 8, color, 2)
-                if number:
-                    p.text(str(number), (x0 + 7, y0 + 4), 11, color, "bold")
-            lines = ui.wrap(self.text(pid), x1 - x0 - 12, 13, "semibold", max_lines=2)
+            color, number = highlight.get(pid, (None, None))
+            p.icon(self.icon(pid), (x0 + 19, (y0 + y1) / 2), 20)
+            lines = ui.wrap(self.text(pid), x1 - x0 - 42 - (12 if number else 0), 12, "semibold", max_lines=2)
             for j, line in enumerate(lines):
-                yy = (y0 + y1) / 2 + (j - (len(lines) - 1) / 2) * 15
-                p.text(line, ((x0 + x1) / 2, yy), 13, ui.TEXT, "semibold", "mm")
+                yy = (y0 + y1) / 2 + (j - (len(lines) - 1) / 2) * 14
+                p.text(line, (x0 + 35, yy), 12, ui.TEXT, "semibold", "lm")
+            if color is not None:
+                ui.rounded_rect(img, x0, y0, x1, y1, 8, color, 2)
+            if number:
+                self.cv2.circle(img, (x1 - 10, y0 + 10), 8, color, -1, self.cv2.LINE_AA)
+                p.text(str(number), (x1 - 10, y0 + 10), 10, (30, 26, 24), "bold", "mm")
         return p.flush(img)
 
     def render(self, frame, pts, mar, motion, now):
@@ -787,9 +894,9 @@ class App:
         if self.emotion_on and self.reading is not None and self.mesh is not None:
             self._draw_emotion_tag(view)
         if pts is None:
-            draw_text(view, "No face detected - face the camera, light from the front", (12, 30), 0.6, RED, 2)
+            draw_text(view, "No face detected - face the camera, light from the front", (12, 62), 0.6, RED, 2)
         if self.brightness is not None and self.brightness < 50:
-            draw_text(view, "Too dark: put a light in front of you", (12, 58), 0.6, AMBER, 2)
+            draw_text(view, "Too dark: put a light in front of you", (12, 90), 0.6, AMBER, 2)
         if self.capturing:
             pulse = 9 + int(3 * abs(np.sin(now * 6)))
             cv2.circle(view, (VW - 92, 28), pulse, (0, 0, 255), -1, cv2.LINE_AA)
@@ -798,14 +905,24 @@ class App:
             cv2.rectangle(view, (0, VH - 8), (int(VW * min(frac, 1)), VH), (0, 0, 255), -1)
         elif self.mode == "auto":
             draw_text(view, "AUTO - listening for lip movement", (12, VH - 16), 0.55, AMBER, 1)
-        ui.rounded_rect(canvas, VX - 2, VY - 2, VX + VW + 1, VY + VH + 1, 6, ui.CARD_EDGE, 1)
+        self._draw_live_badge(view, now)
+        self._draw_lip_signal(view, now)
+        if self.capturing and self.mesh is not None:
+            self._draw_scan_line(view, now)
         canvas[VY:VY + VH, VX:VX + VW] = view
+        self._round_video_corners(canvas)
+        ui.rounded_rect(canvas, VX - 2, VY - 2, VX + VW + 1, VY + VH + 1, VIDEO_RADIUS + 2,
+                        ui.RED if self.capturing else ui.CARD_EDGE, 1)
 
         # prediction, sentence, history: re-drawn only when their content changes
         cands = tuple((pid, round(p, 2)) for pid, p in self._candidates())
         self._paste(canvas, PRED, self.ui.get(
-            "pred", (self._headline(now), cands, self.note, bool(self.options), bool(self.pending), self._votes()),
+            "pred", (self._headline(now), cands, self.note, bool(self.options), bool(self.pending), self._votes(),
+                     self._state(), self._ring(), self._headline_icon()),
             lambda: self._render_prediction(now)))
+        if self.capturing:                    # recording progress in the gauge, live
+            frac = (now - self.cap_start) / (config.RECORD_SECONDS if self.cap_kind == "ptt" else config.AUTO_MAX_SECONDS)
+            ui.ring_gauge(canvas, PRED[2] - 42, PRED[1] + 55, 21, min(1.0, frac), ui.RED, 5)
         self._paste(canvas, SENT, self.ui.get("sentence", tuple(self.sentence), self._render_sentence))
         self._paste(canvas, HIST, self.ui.get(
             "history", tuple((e["pid"], e["source"], time.mktime(e["time"]), (e.get("emotion") or {}).get("emotion"))
@@ -847,6 +964,58 @@ class App:
         self._paste(canvas, STATUS, self.ui.get("status", status_key, lambda: self._render_status(lat)))
         return canvas
 
+    def _draw_live_badge(self, view, now):
+        """'LIVE' with a pulsing dot and the frame rate, top-left of the video."""
+        cv2 = self.cv2
+        roi = view[10:38, 10:150]
+        roi[:] = (roi * 0.35).astype(np.uint8)
+        pulse = 0.55 + 0.45 * abs(np.sin(now * 3))
+        cv2.circle(view, (24, 24), 5, (int(60 * pulse), int(60 * pulse), int(235 * pulse)), -1, cv2.LINE_AA)
+        draw_text(view, "LIVE", (36, 29), 0.45, (235, 235, 235), 1)
+        draw_text(view, f"{self.fps.fps:4.1f} FPS", (80, 29), 0.4, (170, 170, 170), 1)
+
+    def _draw_lip_signal(self, view, now, seconds=3.0):
+        """A small oscilloscope of mouth opening over the last 3 seconds (bottom-right of the video)."""
+        cv2 = self.cv2
+        x0, y0, w, h = VW - 216, VH - 76, 200, 54
+        roi = view[y0:y0 + h, x0:x0 + w]
+        roi[:] = (roi * 0.3).astype(np.uint8)
+        color = (90, 90, 255) if self.capturing else (150, 230, 90)
+        cv2.rectangle(view, (x0, y0), (x0 + w - 1, y0 + h - 1), tuple(int(c * 0.6) for c in color), 1)
+        draw_text(view, "LIP SIGNAL", (x0 + 6, y0 + 13), 0.33, (190, 190, 190), 1)
+        pts = [(x0 + int((t - now + seconds) / seconds * (w - 8)) + 4,
+                y0 + h - 5 - int(min(1.0, max(0.0, m / 0.6)) * (h - 22)))
+               for t, m in self.mar_hist if now - t <= seconds]
+        if len(pts) >= 2:
+            cv2.polylines(view, [np.array(pts, np.int32)], False, color, 2 if self.capturing else 1, cv2.LINE_AA)
+
+    def _draw_scan_line(self, view, now):
+        """A line sweeping down the face while it listens."""
+        cv2 = self.cv2
+        xs, ys = self.mesh[:, 0], self.mesh[:, 1]
+        x0, x1 = int(max(0, VW - xs.max() - 12)), int(min(VW - 1, VW - xs.min() + 12))
+        y0, y1 = int(max(0, ys.min() - 12)), int(min(VH - 1, ys.max() + 12))
+        if y1 - y0 < 10 or x1 - x0 < 10:
+            return
+        y = int(y0 + ((now * 0.8) % 1.0) * (y1 - y0))
+        for k, alpha in enumerate((0.5, 0.3, 0.15)):
+            yy = y - 3 * k
+            if y0 <= yy < y1:
+                row = view[yy, x0:x1].astype(np.float32)
+                view[yy, x0:x1] = (row * (1 - alpha) + np.array((90, 90, 255)) * alpha).astype(np.uint8)
+        cv2.line(view, (x0, y), (x1, y), (120, 120, 255), 1, cv2.LINE_AA)
+
+    def _round_video_corners(self, canvas):
+        r = VIDEO_RADIUS
+        if getattr(self, "_corner", None) is None:
+            yy, xx = np.mgrid[0:r, 0:r]
+            self._corner = (xx - r + 0.5) ** 2 + (yy - r + 0.5) ** 2 > r * r      # top-left, outside the arc
+        c = self._corner
+        canvas[VY:VY + r, VX:VX + r][c] = ui.BG
+        canvas[VY:VY + r, VX + VW - r:VX + VW][c[:, ::-1]] = ui.BG
+        canvas[VY + VH - r:VY + VH, VX:VX + r][c[::-1]] = ui.BG
+        canvas[VY + VH - r:VY + VH, VX + VW - r:VX + VW][c[::-1, ::-1]] = ui.BG
+
     def _draw_emotion_tag(self, view):
         """Emotion above the face's top-left corner, pain expression below it (HUD style)."""
         r = self.reading
@@ -863,13 +1032,16 @@ class App:
     def _render_status(self, lat):
         img, p = self._blank(STATUS), ui.Painter()
         img[:] = (34, 30, 28)
-        left = (f"{'PUSH-TO-TALK' if self.mode == 'ptt' else 'AUTO MODE'}   ·   {self.fps.fps:4.1f} FPS   ·   "
-                f"latency {'-' if lat is None else f'{lat:.0f} ms'}   ·   {self.tracker_name or 'tracker'}   ·   "
-                f"speaker {self.args.speaker}")
-        p.text(left, (16, 13), 12, ui.MUTED, "regular", "lm")
-        p.text("SPACE speak  ·  1/2/3 pick  ·  ENTER say all  ·  BKSP undo  ·  C clear  ·  "
-               "F focus  ·  E emotion  ·  V view  ·  M mode  ·  L context  ·  Q quit",
-               (W - 16, 13), 12, ui.DIM, "regular", "rm")
+        cy = (STATUS[3] - STATUS[1]) // 2
+        x = W - 14
+        for key, action in reversed(KEYS):
+            x = ui.keycap(img, p, x, cy, key, action) - 12
+        mode = "PUSH-TO-TALK" if self.mode == "ptt" else "AUTO MODE"
+        left = (f"{mode}   ·   {self.fps.fps:4.1f} FPS   ·   latency {'-' if lat is None else f'{lat:.0f} ms'}   ·   "
+                f"{self.tracker_name or 'tracker'}   ·   speaker {self.args.speaker}")
+        if ui.text_width(left, 12) > x - 30:                  # not enough room: the essentials only
+            left = f"{mode}   ·   {self.fps.fps:4.1f} FPS"
+        p.text(left, (16, cy), 12, ui.MUTED, "regular", "lm")
         return p.flush(img)
 
     # ----------------------------------------------------------------- mouse

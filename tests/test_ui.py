@@ -38,6 +38,32 @@ class TestToolkit(unittest.TestCase):
         self.assertGreater(img[:30].sum(), 0)
         self.assertGreater(img[30:].sum(), 0)
 
+    def test_every_phrase_has_a_picture_symbol(self):
+        from src.utils import load_phrases
+        phrases = load_phrases(phrase_set="full", custom=False)
+        self.assertEqual([pid for pid, ph in phrases.items() if not ph.get("icon")], [])
+        self.assertEqual(ui.phrase_icon(phrases["P01"]), "\U0001F4A7")            # water drop
+        custom = {"id": "C01", "text": "Turn on the news", "category": "custom", "emergency": False}
+        self.assertEqual(ui.phrase_icon(custom), "⭐")
+        self.assertEqual(ui.phrase_icon({**custom, "emergency": True}), "\U0001F198")
+        self.assertEqual(ui.phrase_icon(None), "")
+
+    @unittest.skipUnless(HAVE_CV, "opencv/mediapipe not installed")
+    def test_new_widgets_draw(self):
+        img = np.zeros((70, 420, 3), np.uint8)
+        p = ui.Painter()
+        ui.ring_gauge(img, 30, 35, 20, 0.6, ui.GREEN)
+        ui.logo(img, 60, 16, 38)
+        left = ui.keycap(img, p, 410, 35, "SPACE", "speak")
+        self.assertLess(left, 410)
+        self.assertLess(ui.badge(img, p, left - 10, 35, "READY", ui.ACCENT), left - 10)
+        p.icon("\U0001F4A7", (120, 35), 20)
+        p.flush(img)
+        for x0, x1 in ((8, 52), (60, 98), (left, 410)):
+            self.assertGreater(img[:, x0:x1].sum(), 0, (x0, x1))
+        ui.bar(img, 10, 60, 100, 6, 0.004, ui.RED)              # a 0.4% bar draws no red dot
+        self.assertLess(int(img[60:66, 10:16, 2].max()), 100)    # red channel: only the grey background
+
     @unittest.skipUnless(HAVE_CV, "opencv/mediapipe not installed")
     def test_mouth_inset_and_muscles(self):
         frame = np.random.default_rng(0).integers(0, 255, (480, 640, 3), dtype=np.uint8)

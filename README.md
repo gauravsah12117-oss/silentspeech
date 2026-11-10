@@ -114,6 +114,7 @@ Everything runs on a normal laptop CPU. No special sensors, no GPU, no cost.
 | **Works without training** | After 4 clips per phrase, an instant recogniser is ready in seconds on any laptop. |
 | **Your own phrases** | Add any phrase in any language (`add_phrase.bat`); it is recognised, spoken and shown on the board like the built-in ones. |
 | **Tap to speak** | Click any phrase tile (or one of the 1/2/3 options) when lip reading isn't possible. |
+| **Picture symbols** | Every phrase has a symbol (💧 water, 🔔 nurse, 🫁 can't breathe), as on the communication boards used in hospitals and special-needs schools: faster to read than words, and usable by people who can't read well. |
 | **Learns while you use it** | Every phrase picked, corrected or confirmed with 1/2/3 becomes a new example. |
 | **Conversation record** | Everything said is written with the time to `logs/conversation-<date>.txt` for caregivers (can be turned off). |
 | **Alerts that don't get lost** | An emergency alert repeats every 20 seconds until someone acknowledges it. |
@@ -604,10 +605,12 @@ Phrases P01–P30 form the **MVP set**. P31–P50 extend it to the **full set**.
 
 ```json
 [
-  {"id": "P01", "text": "I need water", "category": "needs", "emergency": false, "set": "mvp"},
-  {"id": "P12", "text": "I can't breathe", "category": "medical", "emergency": true, "set": "mvp"}
+  {"id": "P01", "text": "I need water", "category": "needs", "emergency": false, "set": "mvp", "icon": "💧"},
+  {"id": "P12", "text": "I can't breathe", "category": "medical", "emergency": true, "set": "mvp", "icon": "🫁"}
 ]
 ```
+
+`icon` is the phrase's picture symbol on the board, in the prediction card, the sentence and the history. Pictures are read faster than words, which is why communication boards for people who can't speak use them. A phrase without one (such as your own phrases) gets one for its category (⭐, or 🆘 for an emergency phrase). The symbols are drawn with the Segoe UI Emoji font on Windows; where that font is missing, the words alone are shown.
 
 **Your own phrases:** `add_phrase.bat` (or `python add_phrase.py "Turn on the news"`) adds a phrase in any language and records 4 calibration clips plus, optionally, your voice saying it. Custom phrases get IDs C01, C02... in `phrases/custom.json`, which stays private (not in git), and join every phrase set. `--emergency` makes one raise the caregiver alert; `--list` and `--remove C01` manage them. For phrases in Hindi or Nepali, record your own voice, since the offline computer voice only speaks English.
 
@@ -825,16 +828,16 @@ The app picks the recogniser automatically: the neural model if it was trained o
 
 ### What the screen shows
 
-- **Top bar:** status chips: the recogniser ("Deep AI" when the deep model is on), how many phrases and their measured accuracy, whether the LLM context check is on, and the output voice, labelled honestly as own recorded voice, cloned voice (AI-generated) or computer voice
-- **Left:** a face-mesh view of the webcam: dimmed video on a grid, the 478-point wireframe, glowing nodes and highlighted lips (**V** switches to the plain camera)
-- **Below the video:** the **tap-to-speak board**, your phrases as tiles (emergency ones tinted red). Click one to say it. When the app is unsure, its three options are marked 1/2/3.
-- **Prediction card:** the recognised phrase with confidence bars for the top 3 (click a row to pick it), and a second opinion: "neural net + templates agree", or what the templates guessed instead
+- **Top bar:** the SilentSpeech mark, and status chips: the recogniser ("Deep AI" when the deep model is on), how many phrases and their measured accuracy, whether the LLM context check and emotion reading are on, and the output voice, labelled honestly as own recorded voice, cloned voice (AI-generated) or computer voice
+- **Left:** a face-mesh view of the webcam: dimmed video on a grid, the 478-point wireframe, glowing nodes and highlighted lips (**V** switches to the plain camera). A **LIVE** badge with the frame rate, a **lip signal** trace of mouth opening over the last 3 seconds, and while it listens a red frame, a scan line over the face and a recording bar
+- **Below the video:** the **tap-to-speak board**: your phrases as tiles with **picture symbols**, as on the communication boards used in hospitals and schools (💧 water, 🔔 nurse, 🫁 can't breathe, 📞 call mother), and emergency phrases tinted red. Click one to say it. When the app is unsure, its three options are numbered 1/2/3.
+- **Prediction card:** a state badge (READY, LISTENING, THINKING, YOUR CHOICE, SPOKEN); the phrase with its symbol and a confidence ring (a live recording-progress ring while listening); the top 3 with confidence bars (click a row to pick it); a second opinion ("neural net + templates agree", or what the templates guessed instead); and, before the first phrase, three steps that show a new user how to start
 - **Mouth, emotion and muscles:** a live zoomed view of the lips with their contours; the *Emotion* card (a drawn face, the emotion and the muscles behind it, a 30-second emotion timeline, a pain meter); and bars for the muscle scores of the mouth, brows, eyes and nose
 - **Emotion tag on the video:** the current emotion above the face, and the pain expression below it when there is one
-- **Sentence and history:** the message being built, and the last phrases with time and how each was chosen (lips, lips + context, picked, corrected, tapped)
+- **Sentence and history:** the message being built, as one chip per phrase (the newest outlined); and the last phrases with their symbol, the time, the facial expression and how each was chosen (lips, lips + context, picked, corrected, tapped)
 - **Alert banner:** turns red with a sound when an emergency phrase is detected, and orange when a strong pain expression is held for 3 seconds; it repeats until acknowledged (A, or click the banner)
 - **Warnings on the video:** "No face detected" and "Too dark" with what to do
-- **Status bar:** mode, FPS, latency, tracker, and all the keys
+- **Status bar:** mode, FPS, latency, tracker, and every key drawn as a keyboard key
 
 The panels are drawn with real fonts (Segoe UI; Nirmala UI for Hindi and Nepali) and redrawn only when their content changes, so the screen stays responsive on a low-power laptop.
 
