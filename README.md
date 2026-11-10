@@ -22,20 +22,21 @@ The first run installs everything (about 1 GB). Then a guided setup:
 
 1. **Check:** camera, face tracking, lighting and speakers.
 2. **Calibrate:** silently mouth 10 demo phrases, 4 times each. The recorder moves on by itself (about 4 minutes).
-3. **Self-test:** it reports how well your clips were recognised and offers extra clips for weak phrases.
+3. **Self-test and deep training:** it reports how well your clips were recognised and offers extra clips for weak phrases. Then neural networks learn your own lip movements (about 3–4 minutes on a slow laptop).
 4. **Voice:** say each phrase once to use your own voice, or use the computer voice.
 5. **Live app:** press SPACE, mouth a phrase, and hear it.
 
-No training is needed: the *instant templates* recogniser compares what you mouth with your own calibration clips (section 6.7). For the competition dataset and the neural model, follow sections 13–15. Run `start.py` again any time; finished steps are skipped.
+Two recognisers learn from your calibration clips. The *instant templates* work straight away: they compare what you mouth with your clips (section 6.7). The *deep model*, an ensemble of neural networks trained on the same clips, takes over once it measurably beats them: 76% against 66% on the first real calibration (section 6.8). For the competition dataset and the big neural model, follow sections 13–15. Run `start.py` again any time; finished steps are skipped.
 
 | Double-click | What it does |
 |---|---|
 | `start.bat` | First-time setup and calibration (above) |
 | `app.bat` | Open the live app straight away |
-| `train_more.bat` | Record 4 more examples of every phrase (about 4 minutes), then show accuracy before and after. **The most effective way to make it more accurate.** |
+| `train_more.bat` | Record 4 more examples of every phrase (about 4 minutes), retrain, then show accuracy before and after. **The most effective way to make it more accurate.** |
+| `train_deep.bat` | Retrain the deep model on all your clips (about 3–4 minutes) and show an honest accuracy check against the templates |
 | `add_phrase.bat` | Add **your own phrase**, any words in any language ("Turn on the news", "राम लाई बोलाउनुहोस्"), and teach it in about a minute |
 
-**Getting more accuracy:** more examples per phrase help the most. On the first real calibration, accuracy rose from 47% with 1 example per phrase to 60% with 2 and 67% with 3. The app also learns while you use it: whenever you pick, correct or confirm a phrase with 1/2/3, that clip becomes a new example. Finally, **F** in the live app switches to your most reliable phrases. With fewer, more distinct phrases accuracy is much higher: on that first calibration, 6 phrases scored about 96% against 75% for all 10.
+**Getting more accuracy:** more examples per phrase help the most. On the first real calibration, accuracy rose from 47% with 1 example per phrase to 60% with 2 and 67% with 3. The app also learns while you use it: whenever you pick, correct or confirm a phrase with 1/2/3, that clip becomes a new example, and the deep model is retrained with those examples when you close the app. Finally, **F** in the live app switches to your most reliable phrases. With fewer, more distinct phrases accuracy is much higher: on that first calibration, 6 phrases scored about 96% against 75% for all 10.
 
 ---
 
@@ -250,7 +251,45 @@ The neural model needs hundreds of clips and a long training run (hours on a low
 4. **Facial muscle scores:** when clips have the 52 blendshapes, the mouth and jaw scores can be added to each frame. Calibration tries several weights (0, 0.5, 1, 2) on that person's own clips and keeps the most accurate, so they are used only if they help. Clips recorded before the Face Landmarker have no scores; once every phrase has 3 or more newer clips, the recogniser built from those (with scores) is compared with the one built from all clips (without), and the better one is kept.
 5. **Calibration:** each calibration clip is recognised from all the others (leave-one-out). That gives an accuracy estimate and sets the confidence scale so that average confidence equals measured accuracy. A clip far from every phrase (talking, laughing, a phrase not in the list) gets low confidence and is never spoken directly.
 
-The app uses the neural model when it has been trained or enrolled on that speaker, and the templates otherwise (`--recognizer` overrides). `evaluate.py --recognizer templates` reports the templates as a training-free baseline next to the neural model, which is a useful comparison for the results slide.
+The app uses the neural model when it has been trained or enrolled on that speaker, then the deep model below, and the templates otherwise (`--recognizer` overrides). `evaluate.py --recognizer templates` reports the templates as a training-free baseline next to the neural model, which is a useful comparison for the results slide.
+
+### 6.8 Deep model (neural networks trained on your own clips)
+
+The templates only *compare* clips. The deep model *learns* what tells one person's phrases apart: an ensemble of 5 small 1-D convolutional networks (`src/deep.py`, about 39,000 weights each) trained on that person's own clips. `start.py` trains it after calibration, `train_more.bat` after every round of new clips, and the live app retrains it when it closes after learning new examples from your 1/2/3 choices. `train_deep.bat` does it on demand. It takes about 3–4 minutes on a 2-core Celeron laptop.
+
+How it learns from only 4–8 clips per phrase:
+
+- **Input:** the same 32-frame signature as the templates (lip shape relative to the clip's average, plus lip speed), standardised.
+- **Augmentation:** every clip is seen as 64 pre-made variations: mirrored, tilted ±8°, scaled ±10%, 0.8–1.2× speed, jittered, with dropped frames.
+- **Network:** a 1×1 projection of the 160 features, three 1-D convolutions over time (the middle one dilated, so it sees 9 frames), then average + max pooling.
+- **Regularisation:** dropout 0.3, weight decay, label smoothing 0.1, mini-batches of 16, a cosine learning-rate schedule, 150 epochs.
+- **Ensemble:** 5 networks from different random starts are averaged, and each clip is also judged as its mirror image.
+- **Calibration:** the confidence is fitted on held-out folds (temperature scaling), so the app's 70% / 40% thresholds keep their meaning.
+
+**Measured honestly before it is used.** Training starts with 5-fold cross-validation: every clip is judged by networks that never saw it, and the templates are scored on exactly the same held-out clips. The app switches to the deep model only if it wins. The templates stay on as a safety check: their "none of these" share multiplies the deep model's confidence, so a yawn or a phrase that isn't in the list is not spoken. On real phrases that share was 0.99 or more for 90% of clips, so it costs nothing there.
+
+First real results (speaker s01, 58 clips of 10 phrases from two sittings, 5-fold cross-validation, 2026-11-10):
+
+| Recogniser | Accuracy | Spoken straight away (≥ 70%) | …of those, right | "Please repeat" (< 40%) |
+|---|---|---|---|---|
+| Instant templates | 66% | 9% | 100% | 47% |
+| **Deep model** (5 networks + mirror) | **76%** | **43%** | **96%** | **10%** |
+
+So the deep model is right more often, and it is sure of itself far more often without being wrong more: fewer "please repeat" moments in a conversation.
+
+What we tried, all on the same folds:
+
+| Network | Training | Accuracy | Time per network |
+|---|---|---|---|
+| 3 conv layers, width 64 (~86k weights) | new random variations every epoch, 400 full-batch epochs | 76% | ~40 s |
+| same | 64-variation bank, mini-batches of 16, 150 epochs | 76% | ~15 s |
+| **1×1 projection + 3 conv layers, width 48 (~39k weights): used** | same | 76% | ~11 s |
+
+Mixing the templates' probabilities into the deep model's (20–50%) did not help (74–76%). When the two agree, which happens on about two thirds of clips, the answer was right 90–92% of the time. When they disagree, the deep model was right about half the time and the templates less than a fifth of the time. The app shows this above the prediction: "neural net + templates agree", or what the templates guessed instead. We also tried speaking straight away only when both agree. When the deep model is confident, a disagreement turned out not to mean much (4 of 5 such clips were right), so that rule would have prevented 1 wrong answer but silenced 4 right ones. The app doesn't use it.
+
+`train_deep.py` runs the same check every time it trains. To save time it uses 2 networks per fold instead of 5, and it leaves out clips where the lips barely moved (the app never classifies those either). On the same 58 clips, with 1 missed clip left out, it reported **77% for the deep model against 67% for the templates**, speaking straight away on 56% of clips with 91% of those right.
+
+Caveats: 57 clips is a small test (one clip is almost 2 percentage points), and all of them came from two sittings, so a new day or new light will score lower. More clips per phrase help the deep model more than the templates.
 
 ---
 
@@ -287,6 +326,7 @@ silentspeech/
 ├── start.py                  # guided quick start: check, calibrate, voice, live app
 ├── add_phrase.py / .bat      # add your own phrase (any language) and teach it
 ├── app.bat / train_more.bat  # open the live app / record more examples
+├── train_deep.py / .bat      # train the deep model (neural-network ensemble) on your own clips
 ├── config.py                 # all settings in one place
 ├── check_setup.py            # verifies webcam, libraries and audio
 ├── collect_data.py           # records lip-landmark clips for each phrase
@@ -304,6 +344,7 @@ silentspeech/
 │   ├── augment.py
 │   ├── model.py
 │   ├── templates.py
+│   ├── deep.py               # deep model: neural-network ensemble trained on one person's clips
 │   ├── recognizer.py
 │   ├── ui.py                 # fonts, cards, mouth close-up, muscle bars for the live app
 │   ├── decision.py
@@ -318,6 +359,7 @@ silentspeech/
 ├── tests/                          # python -m unittest discover -s tests
 │   ├── test_core.py
 │   ├── test_templates.py
+│   ├── test_deep.py                # deep model: learns, calibrates, saves, stays safe
 │   ├── test_ui.py                  # live screen, custom phrases, transcript
 │   └── test_llm_http.py            # LLM layer against a local mock server
 ├── data/
@@ -325,6 +367,7 @@ silentspeech/
 │   └── metadata.csv
 ├── models/
 │   ├── lipreader.pt
+│   ├── deep_<speaker>.pt     # the speaker's deep model (train_deep.py)
 │   └── label_map.json
 ├── audio/
 │   ├── voice_samples/<speaker>.wav          # consented voice recordings
@@ -740,17 +783,17 @@ python app.py --mode auto          # automatic start/stop detection
 python app.py --voice default      # use offline pyttsx3 voice
 python app.py --no-llm             # fully offline mode
 python app.py --speaker s02        # use another teammate's voice and model
-python app.py --recognizer templates   # force the instant templates (or: neural)
+python app.py --recognizer templates   # force the instant templates (or: deep, neural)
 ```
 
-The app picks the recogniser automatically: the neural model if it was trained or enrolled on this speaker, otherwise the speaker's calibration templates from `start.py`.
+The app picks the recogniser automatically: the neural model if it was trained or enrolled on this speaker, otherwise the speaker's deep model (if it beat the templates on held-out clips) with the templates as a safety check, otherwise the calibration templates from `start.py`.
 
 ### What the screen shows
 
-- **Top bar:** status chips: how many phrases and the self-test accuracy, whether the LLM context check is on, and the output voice, labelled honestly as own recorded voice, cloned voice (AI-generated) or computer voice
+- **Top bar:** status chips: the recogniser ("Deep AI" when the deep model is on), how many phrases and their measured accuracy, whether the LLM context check is on, and the output voice, labelled honestly as own recorded voice, cloned voice (AI-generated) or computer voice
 - **Left:** a face-mesh view of the webcam: dimmed video on a grid, the 478-point wireframe, glowing nodes and highlighted lips (**V** switches to the plain camera)
 - **Below the video:** the **tap-to-speak board**, your phrases as tiles (emergency ones tinted red). Click one to say it. When the app is unsure, its three options are marked 1/2/3.
-- **Prediction card:** the recognised phrase with confidence bars for the top 3 (click a row to pick it)
+- **Prediction card:** the recognised phrase with confidence bars for the top 3 (click a row to pick it), and a second opinion: "neural net + templates agree", or what the templates guessed instead
 - **Mouth and muscle activity:** a live zoomed view of the lips with their contours, and bars for the facial muscle scores (jaw open, lips closed, pucker, funnel, press, smile...)
 - **Sentence and history:** the message being built, and the last phrases with time and how each was chosen (lips, lips + context, picked, corrected, tapped)
 - **Alert banner:** turns red with a sound when an emergency phrase is detected, repeats until acknowledged (A, or click the banner)
@@ -764,7 +807,7 @@ The panels are drawn with real fonts (Segoe UI; Nirmala UI for Hindi and Nepali)
 | Key | Action |
 |---|---|
 | SPACE | Capture a phrase (push-to-talk mode) |
-| 1 / 2 / 3 | Pick one of the top-3 options when the system is unsure, or correct (or confirm) the last phrase. With instant templates, each choice is saved as a new example, so the app learns while you use it. |
+| 1 / 2 / 3 | Pick one of the top-3 options when the system is unsure, or correct (or confirm) the last phrase. Each choice is saved as a new example, so the app learns while you use it; the deep model is retrained with them when you close the app. |
 | ENTER | Speak the full sentence |
 | BACKSPACE | Remove the last phrase from the sentence |
 | C | Clear the sentence |
@@ -869,7 +912,7 @@ The XTTS-v2 model is released under a non-commercial license. That's fine for a 
 
 There are two ways to personalise:
 
-- **Calibration (`start.py`):** 4 clips per phrase feed the instant templates. Nothing is trained, so it works on any laptop within minutes, but only for the person who calibrated.
+- **Calibration (`start.py`):** 4 clips per phrase feed the instant templates (ready at once) and the deep model (trained in a few minutes on any laptop). Both work only for the person who calibrated.
 - **Enrolment (`enroll.py`):** fine-tunes the neural model, which needs a trained base model.
 
 A model trained on four teammates won't be perfect for a fifth person, because everyone moves their lips a little differently. Enrolment fixes this quickly:

@@ -9,7 +9,8 @@
 Keys
     SPACE      capture a phrase (push-to-talk; also works in auto mode)
     1 / 2 / 3  pick an option when the system is unsure, or correct / confirm the last phrase
-               (with instant templates, every choice is kept as a new example: it learns as you use it)
+               (every choice is kept as a new example: it learns as you use it, and the deep
+               model catches up with those examples when you close the app)
     ENTER      speak the whole sentence
     BACKSPACE  remove the last phrase          C  clear the sentence
     M          push-to-talk <-> auto mode      L  LLM layer on/off
@@ -32,7 +33,7 @@ from src.dataset import blendshape_path
 from src.landmarks import (BLENDSHAPE_NAMES, N_POINTS, draw_face_hud, draw_lips, make_tracker,
                            mouth_aspect_ratio)
 from src.llm_corrector import LLMCorrector
-from src.recognizer import load_recognizer
+from src.recognizer import load_recognizer, with_deep
 from src.speaker import Speaker
 from src import ui
 from src.ui import PanelCache
@@ -128,6 +129,7 @@ class App:
         self.last_clip = None
         self.last_blend = None
         self.learned_path = None
+        self.learned_count = 0          # new examples this session (the deep model is updated on exit)
         self._learn_lock = threading.Lock()
         self._learn_again = False
         self._learn_thread = None
@@ -280,13 +282,16 @@ class App:
         Only explicit choices are learned, never automatic guesses, so mistakes
         are not reinforced. The templates are rebuilt in the background.
         """
-        if self.last_clip is None or not config.LEARN_FROM_CHOICES or getattr(self.runtime, "kind", "") != "templates":
+        learner = getattr(self.runtime, "kind", "") in ("templates", "deep")
+        if self.last_clip is None or not config.LEARN_FROM_CHOICES or not learner:
             return
         from collect_data import append_metadata, remove_metadata
         if self.learned_path is not None:          # changed their mind about the same clip
             self.learned_path.unlink(missing_ok=True)
             blendshape_path(self.learned_path).unlink(missing_ok=True)
             remove_metadata(self.learned_path.relative_to(config.DATA_DIR).as_posix())
+        else:
+            self.learned_count += 1
         folder = config.RAW_DIR / self.args.speaker / pid
         folder.mkdir(parents=True, exist_ok=True)
         session = config.LEARN_SESSION
@@ -318,6 +323,8 @@ class App:
             try:
                 full = for_speaker(self.args.speaker, self.full_runtime.label_map, rebuild=True)
                 if full is not None and full.label_map == self.full_runtime.label_map:
+                    if getattr(self.full_runtime, "kind", "") == "deep":   # keep the deep model in front
+                        full, _ = with_deep(full, self.args.speaker, quiet=True)
                     self.full_runtime, self._ranking = full, None
                     self.runtime = full.restrict(self.focus) if self.focus else full
                     print(f"[learn] recogniser updated: {self.runtime.describe()}")
@@ -327,8 +334,8 @@ class App:
     # ------------------------------------------------------------------ focus
     def toggle_focus(self, size=None):
         """Switch between all phrases and the speaker's most reliable ones."""
-        if getattr(self.full_runtime, "kind", "") != "templates":
-            self.note = "Focus mode needs the instant templates (run start.py to calibrate)."
+        if getattr(self.full_runtime, "kind", "") not in ("templates", "deep"):
+            self.note = "Focus mode needs your own calibration clips (run start.py to calibrate)."
             return
         if self.focus and size is None:
             self.focus, self.runtime = None, self.full_runtime
@@ -491,6 +498,15 @@ class App:
             return self.text(d.candidates[0][0]) + " ?", ui.MUTED
         return "Press SPACE, then mouth a phrase", ui.DIM
 
+    def _votes(self):
+        """How the deep model and the templates voted on the last clip (a second opinion)."""
+        v = getattr(self.runtime, "last_votes", None)
+        if not v or self.capturing or self.decision is None:
+            return None
+        if v["deep"][0] == v["templates"][0]:
+            return "neural net + templates agree", ui.GREEN
+        return f"templates guessed “{self.text(v['templates'][0])}”", ui.AMBER
+
     def _render_header(self, blink):
         img, p = self._blank(HEADER), ui.Painter()
         if self.alert:
@@ -503,8 +519,10 @@ class App:
         chips = []
         if self.runtime is not None:
             acc = getattr(self.runtime, "report", {}).get("loo_accuracy")
-            chips.append(((f"Focus {len(self.focus)} phrases" if self.focus else
-                           f"{len(self.runtime.label_map)} phrases") + (f" · ~{acc:.0%}" if acc else ""), ui.ACCENT))
+            engine = "Deep AI · " if getattr(self.runtime, "kind", "") == "deep" else ""
+            chips.append((engine + (f"Focus {len(self.focus)} phrases" if self.focus else
+                                    f"{len(self.runtime.label_map)} phrases") + (f" · ~{acc:.0%}" if acc else ""),
+                          ui.ACCENT))
         chips.append((f"{self.llm.provider.title()} context on" if self.llm_on else "Context (LLM) off",
                       ui.GREEN if self.llm_on else ui.DIM))
         chips.append((f"Voice: {self.speaker.label}", ui.GREEN if "own" in self.speaker.label else ui.AMBER))
@@ -521,6 +539,10 @@ class App:
         img, p = self._blank(PRED), ui.Painter()
         w, h = PRED[2] - PRED[0], PRED[3] - PRED[1]
         ui.card(img, p, 0, 0, w - 1, h - 1, "Prediction")
+        votes = self._votes()
+        if votes:
+            label, vcolor = votes
+            p.text(ui.wrap(label, w - 150, 12, "regular", max_lines=1)[0], (w - 14, 15), 12, vcolor, "regular", "rm")
         headline, color = self._headline(now)
         p.text(ui.wrap(headline, w - 32, 28, "bold", max_lines=1)[0], (16, 30), 28, color, "bold")
         for i, (pid, prob) in enumerate(self._candidates()):
@@ -653,7 +675,7 @@ class App:
         # prediction, sentence, history: re-drawn only when their content changes
         cands = tuple((pid, round(p, 2)) for pid, p in self._candidates())
         self._paste(canvas, PRED, self.ui.get(
-            "pred", (self._headline(now), cands, self.note, bool(self.options), bool(self.pending)),
+            "pred", (self._headline(now), cands, self.note, bool(self.options), bool(self.pending), self._votes()),
             lambda: self._render_prediction(now)))
         self._paste(canvas, SENT, self.ui.get("sentence", tuple(self.sentence), self._render_sentence))
         self._paste(canvas, HIST, self.ui.get(
@@ -766,6 +788,18 @@ class App:
             self.llm.close()
 
 
+def update_deep_after_session(app):
+    """The app kept new examples (1/2/3): retrain the deep model with them now that the camera is free."""
+    n = getattr(app, "learned_count", 0)
+    import importlib.util
+    if not config.DEEP_MODEL or n < config.DEEP_RETRAIN_AFTER or importlib.util.find_spec("torch") is None:
+        return
+    print(f"\nThe app learned {n} new example(s) this session. Updating the deep model with them.")
+    print("This takes a few minutes. Closing this window skips it; nothing breaks, it just keeps the old model.")
+    from train_deep import train_deep
+    train_deep(app.args.speaker)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--mode", choices=["ptt", "auto"], default="ptt")
@@ -774,8 +808,9 @@ def main(argv=None):
     ap.add_argument("--speaker", default=config.SPEAKER_ID)
     ap.add_argument("--camera", type=int, default=None)
     ap.add_argument("--model", help="use this model file instead of the speaker's or the base model")
-    ap.add_argument("--recognizer", choices=["auto", "neural", "templates"], default="auto",
-                    help="auto: enrolled/trained neural model if it knows this speaker, else calibration templates")
+    ap.add_argument("--recognizer", choices=["auto", "neural", "deep", "templates"], default="auto",
+                    help="auto: enrolled/trained neural model if it knows this speaker, else the deep model "
+                         "trained on their clips (train_deep.py) with the calibration templates, else the templates")
     ap.add_argument("--focus", type=int, metavar="N",
                     help="start with only your N most reliable phrases (press F in the app to switch)")
     args = ap.parse_args(argv)
@@ -785,6 +820,9 @@ def main(argv=None):
         if args.focus:
             app.toggle_focus(args.focus)
         app.run()
+        update_deep_after_session(app)
+    except KeyboardInterrupt:
+        print("\nStopped.")
     except Exception:
         import traceback
         traceback.print_exc()

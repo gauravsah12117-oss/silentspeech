@@ -77,6 +77,12 @@ def teach(phrase, speaker, camera=None, voice=None):
         acc = m.report.get("per_phrase", {}).get(phrase["id"])
         print(f"\nDone. \"{phrase['text']}\" is now part of your {len(m.label_map)} phrases"
               + (f" (recognised {acc:.0%} of the time in the self-test)." if acc is not None else "."))
+        import importlib.util
+        if config.DEEP_MODEL and importlib.util.find_spec("torch") is not None and ask(
+                "Retrain the deep model so it knows the new phrase too? A few minutes; until then the app "
+                "uses the templates for all phrases. (y/n)", "y").lower().startswith("y"):
+            from train_deep import train_deep
+            train_deep(speaker)
     else:
         print("\nNot enough clips were recorded for it yet; run add_phrase.py again later "
               "or train_more.bat to record more of all phrases.")

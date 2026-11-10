@@ -142,6 +142,10 @@ TRAIN_MORE_REPS = 4           # start.py --train-more: extra clips of every phra
 LEARN_FROM_CHOICES = True     # keep live clips the user confirms with 1/2/3 as new examples
 LEARN_SESSION = 9             # session number for those learned clips (data/raw/<speaker>/<id>/9_xx.npy)
 
+# --- Deep model (train_deep.py, src/deep.py) -------------------------------
+DEEP_MODEL = True             # train it in start.py / train_more; the app uses it when it beats the templates
+DEEP_RETRAIN_AFTER = 3        # once the app has learned this many new examples, retrain it when the app closes
+
 # --- Enrolment (enroll.py) -------------------------------------------------
 ENROLL_SECONDS = 60           # fine-tuning time budget
 ENROLL_LR = 1e-3

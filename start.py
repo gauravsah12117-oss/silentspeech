@@ -7,14 +7,17 @@
 It walks you through:
   1. a camera, face and sound check
   2. calibration: silently mouth each phrase 4 times (hands-free, ~6 s each)
-  3. a check of the calibration, with a chance to add clips for weak phrases
+  3. a check of the calibration, with a chance to add clips for weak phrases,
+     then deep training: neural networks learn your lip movements (a few minutes)
   4. the voice: record each phrase aloud in your own voice, or use the computer voice
   5. the live app
 Finished steps are skipped, so you can run it again any time.
 
-No training is needed: the "instant templates" recogniser compares what you
-mouth with your own calibration clips. For the competition dataset and the
-neural model, see README sections 13-15.
+The "instant templates" recogniser works straight after calibration: it
+compares what you mouth with your own calibration clips. The deep model
+(train_deep.py) then learns from the same clips and takes over when it is
+measurably better. For the competition dataset and the big neural model, see
+README sections 13-15.
 """
 import argparse
 import re
@@ -159,6 +162,29 @@ def report(m, phrases):
     return weak
 
 
+def step_deep(speaker, all_phrases, ask_first=True):
+    """Deep training on all of the speaker's clips (skipped when the model is already up to date)."""
+    if not config.DEEP_MODEL:
+        return None
+    try:
+        from src import deep
+    except ImportError:
+        print("(Deep model skipped: PyTorch is not installed. The templates work without it.)")
+        return None
+    current = deep.up_to_date(speaker, list(all_phrases))
+    if current is not None:
+        acc = current.report.get("cv_accuracy")
+        print("\nYour deep model is up to date" + (f" ({acc:.0%} on clips it never saw)." if acc else "."))
+        return current
+    minutes = max(1, round(deep.estimate_seconds(speaker, list(all_phrases)) / 60))
+    if ask_first and not yes(f"\nTrain the deep model on your clips now? Neural networks learn your lip "
+                             f"movements; about {minutes} min on this laptop.", True):
+        print("Skipped. train_deep.bat does it any time.")
+        return None
+    from train_deep import train_deep
+    return train_deep(speaker, all_phrases)
+
+
 def step_voice(speaker, phrase_ids, phrases):
     from src.speaker import render_tts_cache, voice_dir
     heading(4, "the voice")
@@ -184,6 +210,16 @@ def step_voice(speaker, phrase_ids, phrases):
             print(f"\n  (skipped: {e})")
 
 
+def deep_accuracy(speaker):
+    """Cross-validated accuracy of the speaker's current deep model, or None."""
+    try:
+        from src.deep import DeepModel, model_path
+        model, _ = DeepModel.load(model_path(speaker))
+    except Exception:  # no torch, or no model yet
+        return None
+    return None if model is None else model.report.get("cv_accuracy")
+
+
 def train_more(args, speaker, all_phrases):
     """Record more examples of every calibrated phrase and show the gain."""
     from collect_data import existing_reps
@@ -193,16 +229,24 @@ def train_more(args, speaker, all_phrases):
         sys.exit(f"\n{speaker} has no calibration yet. Run start.bat first.")
     print(f"\n=== Train more: {len(phrases)} phrases ===")
     before = build_templates(speaker, list(phrases)).report.get("loo_accuracy") or 0.0
-    print(f"Right now your clips are recognised {before:.0%} of the time "
-          f"({min(counts[p] for p in phrases)}-{max(counts[p] for p in phrases)} examples per phrase).")
+    deep_before = deep_accuracy(speaker)
+    print(f"Right now your clips are recognised {before:.0%} of the time by the templates"
+          + (f" and {deep_before:.0%} by the deep model" if deep_before is not None else "")
+          + f" ({min(counts[p] for p in phrases)}-{max(counts[p] for p in phrases)} examples per phrase).")
     print("More examples is what makes it more accurate. Mouth each phrase clearly, the same way every time.")
     targets = {pid: len(existing_reps(speaker, pid, TRAIN_SESSION)) + config.TRAIN_MORE_REPS for pid in phrases}
     record(speaker, TRAIN_SESSION, targets, phrases, args.camera, "Training")
     m = build_templates(speaker, list(phrases))
     report(m, all_phrases)
     after = m.report.get("loo_accuracy") or 0.0
-    print(f"\nAccuracy on your clips: {before:.0%} before -> {after:.0%} now.")
+    print(f"\nTemplates on your clips: {before:.0%} before -> {after:.0%} now.")
+    model = step_deep(speaker, all_phrases, ask_first=False)
     ranking = m.rank_phrases()
+    if model is not None and model.report.get("better_than_templates"):
+        if deep_before is not None:
+            print(f"Deep model on clips it never saw: {deep_before:.0%} before -> "
+                  f"{model.report['cv_accuracy']:.0%} now.")
+        ranking = model.rank_phrases()
     n = min(config.FOCUS_PHRASES, len(ranking))
     print(f"Your {n} most reliable phrases (about {ranking[n - 1][1]:.0%} accurate together): "
           + ", ".join(f"\"{all_phrases[p]['text']}\"" for p, _ in ranking[:n]))
@@ -264,6 +308,7 @@ def main(argv=None):
         record(speaker, CAL_SESSION, extra, {pid: all_phrases[pid] for pid in weak}, args.camera, "Extra clips")
         m = build_templates(speaker, list(phrases))
         report(m, all_phrases)
+    step_deep(speaker, all_phrases)
 
     step_voice(speaker, m.label_map, all_phrases)
 
@@ -282,9 +327,11 @@ def launch_app(speaker, camera):
     print("In the app: press SPACE, then silently mouth a phrase within 2.5 seconds.")
     print("1/2/3 pick, correct or confirm a phrase (it learns from that), F focuses on your")
     print("most reliable phrases, ENTER speaks the whole sentence, Q quits.")
-    from app import App
-    App(argparse.Namespace(mode="ptt", voice="cloned", no_llm=False, speaker=speaker, camera=camera,
-                           model=None, recognizer="auto")).run()
+    from app import App, update_deep_after_session
+    app = App(argparse.Namespace(mode="ptt", voice="cloned", no_llm=False, speaker=speaker, camera=camera,
+                                 model=None, recognizer="auto"))
+    app.run()
+    update_deep_after_session(app)
     print("\nThe live app is closed. app.bat opens it again; train_more.bat makes it more accurate.")
 
 
