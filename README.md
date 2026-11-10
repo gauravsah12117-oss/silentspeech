@@ -110,6 +110,7 @@ Everything runs on a normal laptop CPU. No special sensors, no GPU, no cost.
 | **Sentence builder** | Combines phrases ("I need water" + "Call my mother") into one message. |
 | **Safe when unsure** | If confidence is low, it shows its top 3 guesses instead of speaking the wrong thing. |
 | **Emergency alert** | Critical phrases such as "I can't breathe" trigger an on-screen and sound alert for caregivers. |
+| **Sound you can follow without looking** | Short chimes say "listening", "done", "not sure" and "learned"; emergency and pain alarms sound different and play even over speech; every voice clip is levelled to the same, clearly audible loudness; volume on − / +. |
 | **Quick personalisation** | A new user can enrol in about 10 minutes. |
 | **Works without training** | After 4 clips per phrase, an instant recogniser is ready in seconds on any laptop. |
 | **Your own phrases** | Add any phrase in any language (`add_phrase.bat`); it is recognised, spoken and shown on the board like the built-in ones. |
@@ -377,6 +378,7 @@ silentspeech/
 │   ├── templates.py
 │   ├── deep.py               # deep model: neural-network ensemble trained on one person's clips
 │   ├── emotion.py            # facial emotion and pain expression from the 52 muscle scores (FACS)
+│   ├── audio.py              # audio engine: one mixer for speech, sound cues and alarms; loudness levelling
 │   ├── recognizer.py
 │   ├── ui.py                 # fonts, cards, mouth close-up, muscle bars for the live app
 │   ├── decision.py
@@ -393,6 +395,7 @@ silentspeech/
 │   ├── test_templates.py
 │   ├── test_deep.py                # deep model: learns, calibrates, saves, stays safe
 │   ├── test_emotion.py             # emotions, speech-awareness, personal baseline, pain
+│   ├── test_audio.py               # levelling, limiter, cues, alarms, mixer, volume (no sound card needed)
 │   ├── test_ui.py                  # live screen, custom phrases, transcript
 │   └── test_llm_http.py            # LLM layer against a local mock server
 ├── data/
@@ -524,6 +527,7 @@ All settings live in `config.py`, so nobody has to edit code to change behaviour
 | `EMOTION` | `True` | Read the facial expression and a pain score (**E** toggles it in the app) |
 | `EMOTION_TO_LLM` | `True` | Give the LLM a few words about the face while a phrase was mouthed |
 | `PAIN_ALERT`, `PAIN_ALERT_LEVEL`, `PAIN_ALERT_SECONDS` | `True`, `0.5`, `3.0` | A strong pain expression held this long alerts the caregiver |
+| `VOLUME`, `SOUNDS` | `1.0`, `True` | Starting volume (30–200%) and sound cues; − / + and S in the app change them, and the app remembers them in `settings.json` |
 | `AUTO_*` | see file | Auto-mode start/stop thresholds; the app shows live MAR and motion values to tune them |
 | `AUGMENT` | see file | Augmentation ranges; set one to 0 to switch it off |
 
@@ -841,6 +845,26 @@ The app picks the recogniser automatically: the neural model if it was trained o
 
 The panels are drawn with real fonts (Segoe UI; Nirmala UI for Hindi and Nepali) and redrawn only when their content changes, so the screen stays responsive on a low-power laptop.
 
+### What you hear
+
+A patient may be looking at a caregiver rather than the screen, and a caregiver may be across the room, so everything important can also be heard (`src/audio.py`):
+
+| Sound | Means |
+|---|---|
+| Three rising notes | The app is ready |
+| Two rising notes | Listening: mouth the phrase now |
+| One soft low note | The listening window is over |
+| *(the phrase, in your voice)* | Understood and spoken |
+| Two falling notes | Not sure, nothing was spoken: repeat, or pick 1/2/3 |
+| A quick high sparkle (after the phrase) | Your 1/2/3 choice was kept as a new example |
+| One short note, high / low | A setting was switched on / off (E, F, L, M, S) |
+| Fast high two-tone, three times | **Emergency phrase** (repeats every 20 s until A) |
+| Slow falling three notes, twice | **Pain expression** held for 3 s (repeats until A) |
+
+The cues are synthesised soft bell tones (no sound files) with a gentle start and end, so they never click. **S** switches them off; the two alarms always sound.
+
+**One mixer, one volume.** All sound goes through a single always-open output stream that mixes everything, so an alarm sounds *over* speech instead of waiting for it, and the device is opened once instead of for every phrase. Every voice clip is levelled to the same speech loudness (−16 dBFS): on this laptop the recorded own-voice clips were −20.6 dBFS and the computer voice −17.6 dBFS, so the own voice now plays about 4 dB louder and both sound equally loud. A soft limiter bends peaks instead of clipping them, so even 200% volume doesn't crackle. **−** and **+** change the volume in 10% steps (30–200%); the header shows it, and `settings.json` remembers it on that laptop. While the voice plays, the prediction card shows **SPEAKING** with bars that move with the sound.
+
 ### Keyboard controls
 
 | Key | Action |
@@ -856,6 +880,8 @@ The panels are drawn with real fonts (Segoe UI; Nirmala UI for Hindi and Nepali)
 | F | Focus: use only your most reliable phrases (higher accuracy); F again for all phrases |
 | V | View: face-mesh view or plain camera |
 | E | Emotion reading on or off (expression, pain meter, pain alert) |
+| − / + | Volume down / up (remembered) |
+| S | Sound cues on or off (alarms always sound) |
 | Q | Quit |
 
 If no model has been trained yet, the app still opens in tracking-only mode, which is handy for checking the camera and lighting.

@@ -82,6 +82,12 @@ SPEAKER_ID = "s01"            # whose cloned voice and enrolled model to use
 TTS_RATE = 165                # pyttsx3 words per minute
 PHRASE_GAP_S = 0.25           # silence between phrases when speaking a sentence
 
+# --- Sound (src/audio.py) ----------------------------------------------------
+VOLUME = 1.0                  # master volume, 0.3-2.0 (- and + in the app; it is remembered)
+SOUNDS = True                 # short sound cues: listening, done, unsure, learned (S in the app).
+                              # Emergency and pain alarms always sound.
+SETTINGS_FILE = WORK_DIR / "settings.json"   # what the app remembers on this laptop (volume, sounds)
+
 # --- Privacy ---------------------------------------------------------------
 SAVE_VIDEO = False            # save raw video too (only for poster images, with consent)
 SAVE_TRANSCRIPT = True        # keep a text record of what was said (logs/conversation-<date>.txt)

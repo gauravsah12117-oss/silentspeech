@@ -66,6 +66,28 @@ def start_session_log(prefix):
     return path, log
 
 
+# --- Settings the app remembers (volume, sound cues) ----------------------------
+
+def load_settings():
+    try:
+        data = json.loads(Path(config.SETTINGS_FILE).read_text(encoding="utf-8"))
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def save_settings(**changes):
+    """Merge these values into settings.json (kept out of git; one per laptop)."""
+    data = {**load_settings(), **changes}
+    try:
+        path = Path(config.SETTINGS_FILE)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(data, indent=1), encoding="utf-8")
+    except OSError:
+        pass
+    return data
+
+
 # --- Phrases -----------------------------------------------------------------
 
 def load_phrases(path=None, phrase_set=None, custom=True):

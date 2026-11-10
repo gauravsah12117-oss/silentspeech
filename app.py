@@ -18,6 +18,7 @@ Keys
     F          focus: switch to your most reliable phrases (higher accuracy) and back
     V          view: face-mesh hologram <-> plain camera
     E          emotion reading on/off (facial expression and pain, from the muscle scores)
+    - / +      volume down / up (remembered)       S  sound cues on/off (alarms always sound)
 """
 import argparse
 import sys
@@ -41,8 +42,8 @@ from src.recognizer import load_recognizer, with_deep
 from src.speaker import Speaker
 from src import ui
 from src.ui import PanelCache
-from src.utils import (FPSCounter, draw_text, load_env, load_phrases, make_window, open_camera,
-                       start_session_log)
+from src.utils import (FPSCounter, draw_text, load_env, load_phrases, load_settings, make_window, open_camera,
+                       save_settings, start_session_log)
 
 WINDOW = "SilentSpeech"
 W, H = 1280, 720
@@ -57,7 +58,9 @@ HIST = (672, 568, 1264, 690)
 STATUS = (0, 694, W, H)
 MOUTH_CARD, EMO_CARD, MUSCLE_CARD = (0, 176), (186, 405), (415, 591)   # x ranges inside WIDGETS
 KEYS = [("SPACE", "speak"), ("1 2 3", "pick"), ("ENTER", "say all"), ("BKSP", "undo"), ("C", "clear"),
-        ("F", "focus"), ("E", "emotion"), ("V", "view"), ("M", "mode"), ("L", "context"), ("Q", "quit")]
+        ("F", "focus"), ("E", "emotion"), ("V", "view"), ("M", "mode"), ("L", "context"), ("- +", "volume"),
+        ("S", "sounds"), ("Q", "quit")]
+VOICE = (235, 150, 120)          # colour of the SPEAKING state (BGR)
 VIDEO_RADIUS = 12
 WHITE, GREY = (255, 255, 255), (185, 185, 185)
 GREEN, AMBER, RED = (90, 200, 90), (40, 170, 250), (60, 60, 230)
@@ -83,7 +86,9 @@ class App:
             print(f"Tracking-only mode: {why}")
 
         known = self.runtime.label_map if self.runtime else list(self.phrases)
-        self.speaker = Speaker({pid: self.phrases[pid] for pid in known}, args.speaker, args.voice)
+        saved = load_settings()
+        self.speaker = Speaker({pid: self.phrases[pid] for pid in known}, args.speaker, args.voice,
+                               volume=saved.get("volume"), sounds=saved.get("sounds"))
         print(f"Voice: {self.speaker.label}")
         if args.voice == "cloned":
             missing = self.speaker.missing_audio()
@@ -176,6 +181,7 @@ class App:
         self.cap_blend = [b for _, b in seed]
         self.still_since = None
         self.options = None
+        self.speaker.cue("listen")
 
     def finish_capture(self, now):
         self.capturing = False
@@ -188,6 +194,7 @@ class App:
             blend = np.stack([b if b is not None else nan_bs for b in self.cap_blend]).astype(np.float32)
         if self.cap_kind == "auto" and duration < config.AUTO_MIN_SECONDS:
             return
+        self.speaker.cue("done")                 # the listening window is over
         if len(clip) < 5 or np.isnan(clip).any(axis=(1, 2)).mean() > 0.3:
             self.note = "Face not visible enough - please repeat."
             return
@@ -250,6 +257,7 @@ class App:
             self.options = d.candidates
             self.note = ("Not sure, so nothing was spoken. Mouth it again (your tries add up), "
                          "or press / click 1, 2 or 3.")
+            self.speaker.cue("unsure")
 
     def commit(self, pid, note, t_ref, candidates=None, source="lips", confidence=None):
         self.sentence.append(pid)
@@ -350,6 +358,7 @@ class App:
                          "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S")})
         self.learned_path = path
         print(f"[learn] saved your choice as a new example of {pid} ({path.name})")
+        self.speaker.cue("learned", after_speech=True)
         with self._learn_lock:
             self._learn_again = True
             if self._learn_thread is None or not self._learn_thread.is_alive():
@@ -449,6 +458,7 @@ class App:
             self.mode = "auto" if self.mode == "ptt" else "ptt"
             self.active_run = 0
             self.note = "Auto mode: just mouth a phrase." if self.mode == "auto" else "Push-to-talk: press SPACE."
+            self.speaker.cue("on" if self.mode == "auto" else "off")
         elif key in (ord("l"), ord("L")):
             if self.llm_on:
                 self.llm_on = False
@@ -456,6 +466,20 @@ class App:
                 self.llm_on = True
             else:
                 self.note = "LLM unavailable: " + self.llm.unavailable_reason
+            self.speaker.cue("on" if self.llm_on else "off")
+        elif key in (ord("+"), ord("=")):
+            self.change_volume(+0.1)
+        elif key in (ord("-"), ord("_")):
+            self.change_volume(-0.1)
+        elif key in (ord("s"), ord("S")):
+            if self.speaker.sounds:
+                self.speaker.cue("off")
+            self.speaker.sounds = not self.speaker.sounds
+            self.speaker.cue("on")
+            save_settings(sounds=self.speaker.sounds)
+            self.note = ("Sound cues on: a chime when it starts listening, a tick when it stops, a low tone when "
+                         "unsure." if self.speaker.sounds else
+                         "Sound cues off (alarms still sound). S turns them back on.")
         elif key in (ord("a"), ord("A")):
             if self.alert:
                 self.write_transcript(f"alert acknowledged: {self.text(self.alert)}")
@@ -469,11 +493,20 @@ class App:
             self.reading = self.pain_alert = self.pain_since = None
             self.note = ("Emotion reading on: facial expression and pain, from the face's muscle scores."
                          if self.emotion_on else "Emotion reading off. E turns it back on.")
+            self.speaker.cue("on" if self.emotion_on else "off")
         elif key in (ord("f"), ord("F")) and not self.capturing and not self.pending:
             self.toggle_focus()
+            self.speaker.cue("on" if self.focus else "off")
         elif key in (ord("v"), ord("V")):
             self.hud = not self.hud
         return True
+
+    def change_volume(self, step):
+        v = self.speaker.set_volume(round(self.speaker.volume + step, 2))
+        save_settings(volume=v)
+        limit = " (maximum)" if v >= 2.0 else " (minimum)" if v <= 0.3 else ""
+        self.note = f"Volume {v:.0%}{limit}. - and + change it; it is remembered."
+        self.speaker.cue("volume")
 
     def check_pain(self, now):
         """A strong pain expression held for a few seconds (not while mouthing) alerts the caregiver."""
@@ -485,7 +518,7 @@ class App:
             held = now - self.pain_since
             if self.pain_alert is None and held >= config.PAIN_ALERT_SECONDS:
                 self.pain_alert = self.alert_last_beep = now
-                self.speaker.alert()
+                self.speaker.alert("pain")
                 self.write_transcript(f"ALERT raised: pain expression ({r.pain_level}) held for {held:.0f} s")
                 print(f"[pain] {r.pain_level} pain expression held for {held:.0f} s - caregiver alerted")
         elif r.pain < 0.6 * config.PAIN_ALERT_LEVEL:
@@ -537,7 +570,7 @@ class App:
                 self.prebuffer.clear()
         if (self.alert or self.pain_alert) and now - self.alert_last_beep >= config.ALERT_REPEAT_SECONDS:
             self.alert_last_beep = now          # nobody acknowledged yet: sound it again
-            self.speaker.alert()
+            self.speaker.alert("pain" if self.pain_alert and not self.alert else "emergency")
         self.resolve_llm(now)
         return mar, motion
 
@@ -609,7 +642,9 @@ class App:
         chips.append((f"{self.llm.provider.title()} context on" if self.llm_on else "Context (LLM) off",
                       ui.GREEN if self.llm_on else ui.DIM))
         chips.append(("Emotion on" if self.emotion_on else "Emotion off", ui.GREEN if self.emotion_on else ui.DIM))
-        chips.append((f"Voice: {self.speaker.label}", ui.GREEN if "own" in self.speaker.label else ui.AMBER))
+        cues = "" if self.speaker.sounds else " · cues off"
+        chips.append((f"Voice: {self.speaker.label} · {self.speaker.volume:.0%}{cues}",
+                      ui.GREEN if "own" in self.speaker.label else ui.AMBER))
         x = W - 16
         for label, color in reversed(chips):
             tw = ui.text_width(label, 13, "semibold")
@@ -629,6 +664,8 @@ class App:
             return "THINKING", ui.AMBER
         if self.options:
             return "YOUR CHOICE", ui.AMBER
+        if self.speaker.busy:
+            return "SPEAKING", VOICE
         if self.last_committed and self.sentence:
             return "SPOKEN", ui.GREEN
         return "READY", ui.ACCENT
@@ -881,7 +918,8 @@ class App:
         blink = bool(self.alert or self.pain_alert) and int(now * 2) % 2 == 0
         self._paste(canvas, HEADER, self.ui.get(
             "header", (self.alert, blink, self.focus and len(self.focus), self.llm_on, self.speaker.label,
-                       id(self.runtime), bool(self.pain_alert), self.emotion_on),
+                       id(self.runtime), bool(self.pain_alert), self.emotion_on, self.speaker.volume,
+                       self.speaker.sounds),
             lambda: self._render_header(blink)))
 
         # video: face-mesh view (V toggles) or the plain camera with lip contours
@@ -920,6 +958,8 @@ class App:
             "pred", (self._headline(now), cands, self.note, bool(self.options), bool(self.pending), self._votes(),
                      self._state(), self._ring(), self._headline_icon()),
             lambda: self._render_prediction(now)))
+        if self._state()[0] == "SPEAKING":
+            self._draw_speaking_meter(canvas, now)
         if self.capturing:                    # recording progress in the gauge, live
             frac = (now - self.cap_start) / (config.RECORD_SECONDS if self.cap_kind == "ptt" else config.AUTO_MAX_SECONDS)
             ui.ring_gauge(canvas, PRED[2] - 42, PRED[1] + 55, 21, min(1.0, frac), ui.RED, 5)
@@ -963,6 +1003,18 @@ class App:
         status_key = (int(now * 2), self.mode, round(self.fps.fps), lat and round(lat))
         self._paste(canvas, STATUS, self.ui.get("status", status_key, lambda: self._render_status(lat)))
         return canvas
+
+    def _draw_speaking_meter(self, canvas, now):
+        """Four bars that move with the voice, in place of the dot on the SPEAKING badge."""
+        cv2 = self.cv2
+        x0 = int(PRED[2] - 12 - ui.text_width("SPEAKING", 11, "bold") - 28)
+        cy = PRED[1] + 16
+        cv2.rectangle(canvas, (x0 + 4, cy - 8), (x0 + 18, cy + 8), ui._mix(VOICE, ui.CARD, 0.22), -1)
+        level = min(1.0, self.speaker.level / 0.12)
+        for i in range(4):
+            amp = 0.25 + 0.75 * level * (0.55 + 0.45 * abs(np.sin(now * 13 + i * 1.9)))
+            half = max(1, int(7 * amp))
+            cv2.rectangle(canvas, (x0 + 5 + 3 * i, cy - half), (x0 + 6 + 3 * i, cy + half), VOICE, -1)
 
     def _draw_live_badge(self, view, now):
         """'LIVE' with a pulsing dot and the frame rate, top-left of the video."""
@@ -1073,6 +1125,7 @@ class App:
             sys.exit("Could not open the webcam. Try --camera 1, close Zoom/Teams, or run python check_setup.py.")
         make_window(WINDOW, W, H)
         cv2.setMouseCallback(WINDOW, self.on_mouse)
+        self.speaker.cue("ready")
         failures = 0
         try:
             with make_tracker() as tracker:

@@ -8,6 +8,8 @@ models/*.task
 models/experiments/
 logs/
 phrases/custom.json
+settings.json
+models/*.tmp
 
 # Python
 venv/
