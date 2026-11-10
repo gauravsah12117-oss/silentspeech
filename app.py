@@ -17,6 +17,7 @@ Keys
     A          acknowledge an emergency alert  Q  quit
     F          focus: switch to your most reliable phrases (higher accuracy) and back
     V          view: face-mesh hologram <-> plain camera
+    E          emotion reading on/off (facial expression and pain, from the muscle scores)
 """
 import argparse
 import sys
@@ -30,6 +31,9 @@ import config
 from src.decision import combine_attempts, decide, top_k
 from src.features import fill_missing, frame_motion, lip_motion, normalise, pad_to_length
 from src.dataset import blendshape_path
+from src.emotion import COLORS as EMO_COLORS
+from src.emotion import EMOTIONS, EmotionReader
+from src.emotion import describe as describe_expression
 from src.landmarks import (BLENDSHAPE_NAMES, N_POINTS, draw_face_hud, draw_lips, make_tracker,
                            mouth_aspect_ratio)
 from src.llm_corrector import LLMCorrector
@@ -51,6 +55,7 @@ WIDGETS = (672, 300, 1264, 456)
 SENT = (672, 464, 1264, 560)
 HIST = (672, 568, 1264, 690)
 STATUS = (0, 694, W, H)
+MOUTH_CARD, EMO_CARD, MUSCLE_CARD = (0, 176), (186, 405), (415, 591)   # x ranges inside WIDGETS
 WHITE, GREY = (255, 255, 255), (185, 185, 185)
 GREEN, AMBER, RED = (90, 200, 90), (40, 170, 250), (60, 60, 230)
 NAN_ROW = np.full((N_POINTS, 3), np.nan, np.float32)
@@ -120,6 +125,15 @@ class App:
         self.tracker_name = ""
         self.cap_blend = []
 
+        # facial emotion and pain expression from the 52 muscle scores (E toggles)
+        self.emotion = EmotionReader()
+        self.emotion_on = config.EMOTION
+        self.reading = None
+        self.utter_emotion = None       # the face around the last mouthed phrase
+        self.pain_since = None          # when the current pain expression started
+        self.pain_alert = None          # when a held pain expression alerted the caregiver
+        self.pain_quiet_until = 0.0
+
         # focus mode (F): only the speaker's most reliable phrases
         self.full_runtime = self.runtime
         self.focus = None
@@ -187,6 +201,8 @@ class App:
             self.note = "Face not visible enough - please repeat."
             return
         self.last_clip, self.last_blend, self.learned_path = clip, blend, None
+        # the face just before and while mouthing it (src/emotion.py)
+        self.utter_emotion = self.emotion.summary(self.cap_start - 1.5, now) if self.emotion_on else None
         # "Not sure - please repeat": a quick repeat counts together with the earlier try (or tries)
         tries, labels = 1, list(self.runtime.label_map)
         r = self.retry
@@ -200,6 +216,8 @@ class App:
         self.decision = d
         top = ", ".join(f"{pid} {p:.2f}" for pid, p in d.candidates)
         print(f"[{d.action}] {top}" + (f"  ALERT {d.alert_phrase_id}" if d.alert_phrase_id else ""))
+        if self.utter_emotion:
+            print(f"[face] {describe_expression(self.utter_emotion) or 'calm'}")
         together = f" (your {tries} tries together)" if tries > 1 else ""
 
         if d.alert_phrase_id:
@@ -212,7 +230,8 @@ class App:
                         source="lips", confidence=d.confidence)
         elif d.action == "llm":
             if self.llm_on:
-                self.pending = {"future": self.llm.submit(d.candidates, list(self.history), self.phrases),
+                self.pending = {"future": self.llm.submit(d.candidates, list(self.history), self.phrases,
+                                                          self._expression_for_llm()),
                                 "deadline": now + config.LLM_TIMEOUT_S, "t_ref": now, "decision": d}
                 self.options = d.candidates
                 self.note = f"Not fully sure{together} - asking {self.llm.provider.title()} to use the conversation..."
@@ -233,9 +252,26 @@ class App:
         self.note = note
         self.last_committed = (pid, candidates or [])
         self.speaker.say([pid], t_ref)
-        self.log.append({"time": time.localtime(), "pid": pid, "source": source, "confidence": confidence})
+        emotion = self._phrase_emotion(source, t_ref)
+        self.log.append({"time": time.localtime(), "pid": pid, "source": source, "confidence": confidence,
+                         "emotion": emotion})
         conf = f" {confidence:.0%}" if confidence is not None else ""
-        self.write_transcript(f"{self.text(pid)}  [{SOURCE_LABEL.get(source, source)}{conf}]")
+        face = describe_expression(emotion)
+        self.write_transcript(f"{self.text(pid)}  [{SOURCE_LABEL.get(source, source)}{conf}]"
+                              + (f"  ({face})" if face else ""))
+
+    def _phrase_emotion(self, source, t_ref):
+        """The facial expression that goes with a spoken phrase (None when emotion reading is off)."""
+        if not self.emotion_on:
+            return None
+        if source == "tap":                       # no mouthing: the face over the last 3 seconds
+            return self.emotion.summary(t_ref - 3.0, t_ref)
+        return self.utter_emotion
+
+    def _expression_for_llm(self):
+        if not (self.emotion_on and config.EMOTION_TO_LLM):
+            return None
+        return describe_expression(self.utter_emotion)
 
     def write_transcript(self, line):
         """Keep a plain-text record of the conversation for caregivers (logs/conversation-<date>.txt)."""
@@ -415,12 +451,37 @@ class App:
         elif key in (ord("a"), ord("A")):
             if self.alert:
                 self.write_transcript(f"alert acknowledged: {self.text(self.alert)}")
+            if self.pain_alert:
+                self.write_transcript("alert acknowledged: pain expression")
+                self.pain_quiet_until = now + config.PAIN_ALERT_QUIET_SECONDS
             self.alert = None
+            self.pain_alert = self.pain_since = None
+        elif key in (ord("e"), ord("E")):
+            self.emotion_on = not self.emotion_on
+            self.reading = self.pain_alert = self.pain_since = None
+            self.note = ("Emotion reading on: facial expression and pain, from the face's muscle scores."
+                         if self.emotion_on else "Emotion reading off. E turns it back on.")
         elif key in (ord("f"), ord("F")) and not self.capturing and not self.pending:
             self.toggle_focus()
         elif key in (ord("v"), ord("V")):
             self.hud = not self.hud
         return True
+
+    def check_pain(self, now):
+        """A strong pain expression held for a few seconds (not while mouthing) alerts the caregiver."""
+        r = self.reading
+        if not config.PAIN_ALERT or r is None or self.capturing or now < self.pain_quiet_until:
+            return
+        if r.pain >= config.PAIN_ALERT_LEVEL:
+            self.pain_since = self.pain_since or now
+            held = now - self.pain_since
+            if self.pain_alert is None and held >= config.PAIN_ALERT_SECONDS:
+                self.pain_alert = self.alert_last_beep = now
+                self.speaker.alert()
+                self.write_transcript(f"ALERT raised: pain expression ({r.pain_level}) held for {held:.0f} s")
+                print(f"[pain] {r.pain_level} pain expression held for {held:.0f} s - caregiver alerted")
+        elif r.pain < 0.6 * config.PAIN_ALERT_LEVEL:
+            self.pain_since = None
 
     # --------------------------------------------------------- per-frame step
     def step(self, pts, now, blend=None):
@@ -434,6 +495,12 @@ class App:
             self.prev_norm = norm
         else:
             self.prev_norm = None
+
+        if self.emotion_on and blend is not None:
+            self.reading = self.emotion.update(blend, now, talking=self.capturing)
+            self.check_pain(now)
+        elif self.reading is not None and self.emotion.last_t is not None and now - self.emotion.last_t > 1.0:
+            self.reading = None                     # face lost for a second: no stale reading
 
         if self.capturing:
             self.cap_points.append(row)
@@ -459,7 +526,7 @@ class App:
                 self.active_run = 0
                 self.start_capture("auto", now, list(self.prebuffer))
                 self.prebuffer.clear()
-        if self.alert and now - self.alert_last_beep >= config.ALERT_REPEAT_SECONDS:
+        if (self.alert or self.pain_alert) and now - self.alert_last_beep >= config.ALERT_REPEAT_SECONDS:
             self.alert_last_beep = now          # nobody acknowledged yet: sound it again
             self.speaker.alert()
         self.resolve_llm(now)
@@ -514,6 +581,11 @@ class App:
             p.text(f"EMERGENCY  —  “{self.text(self.alert)}”  —  caregiver alerted.   "
                    "Press A (or click here) to acknowledge.", (24, 31), 21, ui.TEXT, "bold", "lm")
             return p.flush(img)
+        if self.pain_alert:
+            ui.rounded_rect(img, 8, 7, W - 8, 55, 12, (30, 115, 210) if blink else (35, 75, 135))
+            p.text("PAIN EXPRESSION  —  held for a few seconds, please check on them.   "
+                   "Press A (or click here) to dismiss.", (24, 31), 21, ui.TEXT, "bold", "lm")
+            return p.flush(img)
         p.text("SilentSpeech", (20, 31), 28, ui.TEXT, "bold", "lm")
         p.text("silent lips  ›  phrase  ›  their own voice", (214, 33), 15, ui.MUTED, "regular", "lm")
         chips = []
@@ -525,6 +597,7 @@ class App:
                           ui.ACCENT))
         chips.append((f"{self.llm.provider.title()} context on" if self.llm_on else "Context (LLM) off",
                       ui.GREEN if self.llm_on else ui.DIM))
+        chips.append(("Emotion on" if self.emotion_on else "Emotion off", ui.GREEN if self.emotion_on else ui.DIM))
         chips.append((f"Voice: {self.speaker.label}", ui.GREEN if "own" in self.speaker.label else ui.AMBER))
         x = W - 16
         for label, color in reversed(chips):
@@ -560,14 +633,59 @@ class App:
 
     def _render_widgets_frame(self):
         img, p = self._blank(WIDGETS), ui.Painter()
-        w, h = WIDGETS[2] - WIDGETS[0], WIDGETS[3] - WIDGETS[1]
-        ui.card(img, p, 0, 0, 260, h - 1, "Mouth")
-        ui.card(img, p, 270, 0, w - 1, h - 1, "Muscle activity")
+        h = WIDGETS[3] - WIDGETS[1]
+        ui.card(img, p, MOUTH_CARD[0], 0, MOUTH_CARD[1], h - 1, "Mouth")
+        x0, x1 = MUSCLE_CARD
+        ui.card(img, p, x0, 0, x1, h - 1, "Muscles")
         if self.has_blend:
             for i, (label, _) in enumerate(ui.MUSCLE_ROWS):
-                p.text(label, (284, 30 + 15 * i), 12, ui.MUTED, "regular", "lm")
+                p.text(label, (x0 + 12, 30 + 15 * i), 11, ui.MUTED, "regular", "lm")
         else:
-            p.text("Needs the Face Landmarker tracker", (284, 60), 13, ui.DIM)
+            p.text("Needs Face Landmarker", (x0 + 12, 60), 12, ui.DIM)
+        return p.flush(img)
+
+    @staticmethod
+    def _emotion_display(r):
+        """(icon, label, colour, score). A strong pain expression is shown as pain: to the FACS
+        emotion rules a pain grimace looks like anger or disgust, which would mislead a caregiver."""
+        if r.pain_level == "strong":
+            return "pain", "In pain", ui.RED, r.pain
+        return r.emotion, r.label, EMO_COLORS[r.emotion], r.confidence
+
+    def _emotion_key(self):
+        r = self.reading if self.emotion_on else None
+        if r is None:
+            return (self.emotion_on, self.has_blend)
+        icon, _, _, score = self._emotion_display(r)
+        return (icon, round(score * 20), tuple(w for w, _ in r.drivers), r.pain_level,
+                sum(r.pain >= s for s in ui.PAIN_STEPS), r.learning)
+
+    def _render_emotion(self):
+        """The emotion card: a drawn face, the emotion, the muscles behind it, and the pain meter."""
+        x0, x1 = EMO_CARD
+        w, h = x1 - x0 + 1, WIDGETS[3] - WIDGETS[1]
+        img, p = np.full((h, w, 3), ui.BG, np.uint8), ui.Painter()
+        ui.card(img, p, 0, 0, w - 1, h - 1, "Emotion")
+        r = self.reading if self.emotion_on else None
+        if r is None:
+            msg = ("Emotion reading is off (press E)" if not self.emotion_on else
+                   "Needs Face Landmarker" if not self.has_blend else "Looking for a face...")
+            p.text(msg, (14, 66), 12, ui.DIM)
+            return p.flush(img)
+        icon, label, color, score = self._emotion_display(r)
+        p.text("from face muscles", (w - 12, 10), 10, ui.DIM, "regular", "ra")
+        ui.emotion_face(img, 40, 62, 24, icon, color)
+        p.text(label, (76, 52), 20, color, "bold", "lm")
+        p.text(f"{score:.0%}", (w - 12, 52), 13, ui.MUTED, "semibold", "rm")
+        why = ("learning your resting face..." if r.learning else
+               " · ".join(word for word, _ in r.drivers) if r.drivers else "relaxed face")
+        p.text(ui.wrap(why, w - 86, 10, max_lines=1)[0], (76, 76), 10, ui.MUTED, "regular", "lm")
+        p.text("LAST 30 SECONDS", (14, 91), 9, ui.DIM, "semibold")
+        p.text("PAIN", (14, 129), 11, ui.DIM, "semibold", "lm")
+        ui.pain_meter(img, 52, 125, r.pain)
+        lit = sum(r.pain >= s for s in ui.PAIN_STEPS)
+        level_color = ui.PAIN_COLORS[lit - 1] if r.pain_level != "none" and lit else ui.MUTED
+        p.text(r.pain_level, (w - 12, 129), 12, level_color, "semibold", "rm")
         return p.flush(img)
 
     def _render_sentence(self):
@@ -602,6 +720,10 @@ class App:
             if e.get("confidence") is not None and e["source"] in ("lips", "llm", "fallback"):
                 tag += f" {e['confidence']:.0%}"
             p.text(tag, (w - 14, y), 12, ui.DIM, "regular", "ra")
+            emo = e.get("emotion")
+            if emo and emo["emotion"] != "neutral":
+                p.text(emo["label"].lower(), (w - 24 - ui.text_width(tag, 12), y), 12, EMO_COLORS[emo["emotion"]],
+                       "semibold", "ra")
         return p.flush(img)
 
     def _board_ids(self):
@@ -644,11 +766,16 @@ class App:
 
     def render(self, frame, pts, mar, motion, now):
         cv2 = self.cv2
-        canvas = np.full((H, W, 3), ui.BG, np.uint8)
-        blink = bool(self.alert) and int(now * 2) % 2 == 0
+        # Every panel is painted over its own area each frame, so the background is filled
+        # once and the same canvas reused (a fresh 1280x720 fill cost ~16 ms on a slow CPU).
+        if getattr(self, "_canvas", None) is None:
+            self._canvas = np.full((H, W, 3), ui.BG, np.uint8)
+        canvas = self._canvas
+        blink = bool(self.alert or self.pain_alert) and int(now * 2) % 2 == 0
         self._paste(canvas, HEADER, self.ui.get(
             "header", (self.alert, blink, self.focus and len(self.focus), self.llm_on, self.speaker.label,
-                       id(self.runtime)), lambda: self._render_header(blink)))
+                       id(self.runtime), bool(self.pain_alert), self.emotion_on),
+            lambda: self._render_header(blink)))
 
         # video: face-mesh view (V toggles) or the plain camera with lip contours
         view = draw_face_hud(frame, self.mesh, pts) if self.hud else draw_lips(frame.copy(), pts)
@@ -657,6 +784,8 @@ class App:
             label = f"{self.tracker_name}: {len(self.mesh)} points" + (
                 " + 52 muscle scores" if self.has_blend else "")
             draw_text(view, label, (12, VH - (40 if self.mode == "auto" else 16)), 0.45, (150, 230, 90), 1)
+        if self.emotion_on and self.reading is not None and self.mesh is not None:
+            self._draw_emotion_tag(view)
         if pts is None:
             draw_text(view, "No face detected - face the camera, light from the front", (12, 30), 0.6, RED, 2)
         if self.brightness is not None and self.brightness < 50:
@@ -679,16 +808,24 @@ class App:
             lambda: self._render_prediction(now)))
         self._paste(canvas, SENT, self.ui.get("sentence", tuple(self.sentence), self._render_sentence))
         self._paste(canvas, HIST, self.ui.get(
-            "history", tuple((e["pid"], e["source"], time.mktime(e["time"])) for e in self.log), self._render_history))
+            "history", tuple((e["pid"], e["source"], time.mktime(e["time"]), (e.get("emotion") or {}).get("emotion"))
+                             for e in self.log), self._render_history))
 
         # mouth close-up + live muscle bars (every frame)
         widgets = self.ui.get("widgets", self.has_blend, self._render_widgets_frame).copy()
-        widgets[24:24 + 124, 10:10 + 240] = ui.mouth_inset(frame, pts, (240, 124))
+        mx0, mx1 = MOUTH_CARD
+        widgets[24:24 + 124, mx0 + 10:mx1 - 10] = ui.mouth_inset(frame, pts, (mx1 - mx0 - 20, 124))
+        ex0, ex1 = EMO_CARD
+        widgets[:, ex0:ex1 + 1] = self.ui.get("emotion", self._emotion_key(), self._render_emotion)
+        if self.emotion_on and self.reading is not None:
+            ui.timeline_strip(widgets, ex0 + 14, 104, ex1 - ex0 - 26, 6, list(self.emotion.timeline), now,
+                              EMO_COLORS, EMOTIONS)
         values = ui.muscle_values(self.last_blend_live) if self.has_blend else None
         if values is not None:
             self.muscles = values if self.muscles is None else 0.5 * self.muscles + 0.5 * values
             for i, v in enumerate(self.muscles):
-                ui.bar(widgets, 400, 25 + 15 * i, WIDGETS[2] - WIDGETS[0] - 416, 8, v, ui.ACCENT)
+                ui.bar(widgets, MUSCLE_CARD[0] + 92, 26 + 15 * i, MUSCLE_CARD[1] - MUSCLE_CARD[0] - 104, 7, v,
+                       ui.ACCENT)
         self._paste(canvas, WIDGETS, widgets)
 
         # tap-to-speak board
@@ -710,6 +847,19 @@ class App:
         self._paste(canvas, STATUS, self.ui.get("status", status_key, lambda: self._render_status(lat)))
         return canvas
 
+    def _draw_emotion_tag(self, view):
+        """Emotion above the face's top-left corner, pain expression below it (HUD style)."""
+        r = self.reading
+        xs, ys = self.mesh[:, 0], self.mesh[:, 1]
+        x0 = int(np.clip(VW - (xs.max() + 12), 4, VW - 170))          # the view is mirrored
+        y0, y1 = int(ys.min() - 12), int(ys.max() + 12)
+        _, label, color, score = self._emotion_display(r)
+        draw_text(view, f"{label.upper()} {score:.0%}", (x0, max(18, y0 - 8)), 0.5, color, 1)
+        if r.pain_level != "none":
+            lit = sum(r.pain >= s for s in ui.PAIN_STEPS)
+            draw_text(view, f"PAIN EXPRESSION: {r.pain_level.upper()}", (x0, min(VH - 30, y1 + 20)), 0.45,
+                      ui.PAIN_COLORS[max(0, lit - 1)], 1)
+
     def _render_status(self, lat):
         img, p = self._blank(STATUS), ui.Painter()
         img[:] = (34, 30, 28)
@@ -718,7 +868,7 @@ class App:
                 f"speaker {self.args.speaker}")
         p.text(left, (16, 13), 12, ui.MUTED, "regular", "lm")
         p.text("SPACE speak  ·  1/2/3 pick  ·  ENTER say all  ·  BKSP undo  ·  C clear  ·  "
-               "F focus  ·  V view  ·  M mode  ·  L context  ·  Q quit",
+               "F focus  ·  E emotion  ·  V view  ·  M mode  ·  L context  ·  Q quit",
                (W - 16, 13), 12, ui.DIM, "regular", "rm")
         return p.flush(img)
 
@@ -730,7 +880,7 @@ class App:
     def handle_clicks(self, now):
         clicks, self.clicks = self.clicks, []
         for x, y in clicks:
-            if self.alert and y < HEADER[3]:
+            if (self.alert or self.pain_alert) and y < HEADER[3]:
                 self.handle_key(ord("a"), now)
                 continue
             for k, (x0, y0, x1, y1) in enumerate(self._candidate_rects(), 1):

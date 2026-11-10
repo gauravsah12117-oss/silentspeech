@@ -197,13 +197,13 @@ def mouth_inset(frame, lips, size):
 # Muscle-activity rows: label -> blendshape names averaged together.
 MUSCLE_ROWS = [
     ("Jaw open", ["jawOpen"]),
-    ("Lips closed", ["mouthClose"]),
     ("Pucker", ["mouthPucker"]),
-    ("Funnel", ["mouthFunnel"]),
-    ("Press", ["mouthPressLeft", "mouthPressRight"]),
+    ("Lips press", ["mouthPressLeft", "mouthPressRight"]),
     ("Smile", ["mouthSmileLeft", "mouthSmileRight"]),
-    ("Lower lip down", ["mouthLowerDownLeft", "mouthLowerDownRight"]),
-    ("Roll in", ["mouthRollLower", "mouthRollUpper"]),
+    ("Brows up", ["browInnerUp", "browOuterUpLeft", "browOuterUpRight"]),
+    ("Brows down", ["browDownLeft", "browDownRight"]),
+    ("Eyes narrow", ["eyeSquintLeft", "eyeSquintRight"]),
+    ("Nose wrinkle", ["noseSneerLeft", "noseSneerRight"]),
 ]
 
 
@@ -215,6 +215,122 @@ def muscle_values(blend):
         return None
     idx = {n: i for i, n in enumerate(BLENDSHAPE_NAMES)}
     return np.array([np.mean([blend[idx[n]] for n in names]) for _, names in MUSCLE_ROWS], np.float32)
+
+
+# --- Emotion widgets -------------------------------------------------------------
+
+def _mix(a, b, t):
+    return tuple(int(round(x * t + y * (1 - t))) for x, y in zip(a, b))
+
+
+def emotion_face(img, cx, cy, r, emotion, color):
+    """A small drawn face showing the emotion. Drawn 4x larger and scaled down,
+    so the strokes come out smooth."""
+    import cv2
+
+    s = 4
+    x0, y0, x1, y1 = int(cx - r - 3), int(cy - r - 3), int(cx + r + 4), int(cy + r + 4)
+    patch = img[y0:y1, x0:x1]
+    big = cv2.resize(patch, ((x1 - x0) * s, (y1 - y0) * s), interpolation=cv2.INTER_NEAREST)
+    c, R = ((cx - x0) * s, (cy - y0) * s), r * s
+    t = max(2, int(0.1 * R))
+
+    def P(dx, dy):
+        return int(c[0] + dx * R), int(c[1] + dy * R)
+
+    def line(a, b):
+        cv2.line(big, P(*a), P(*b), color, t, cv2.LINE_AA)
+
+    def arc(center, ax, ay, a0, a1):
+        cv2.ellipse(big, P(*center), (int(ax * R), int(ay * R)), 0, a0, a1, color, t, cv2.LINE_AA)
+
+    def dot(center, rad, filled=True):
+        cv2.circle(big, P(*center), max(2, int(rad * R)), color, -1 if filled else t, cv2.LINE_AA)
+
+    cv2.circle(big, c, R, _mix(color, CARD, 0.22), -1, cv2.LINE_AA)
+    cv2.circle(big, c, R, color, t, cv2.LINE_AA)
+    for side in (-1, 1):
+        ex = 0.36 * side
+        if emotion == "happy":
+            arc((ex, -0.1), 0.15, 0.12, 180, 360)
+        elif emotion in ("surprised", "afraid"):
+            dot((ex, -0.14), 0.13, filled=False)
+            dot((ex, -0.14), 0.04)
+            if emotion == "surprised":
+                arc((ex, -0.44), 0.17, 0.08, 200, 340)
+            else:
+                line((0.54 * side, -0.4), (0.18 * side, -0.56))
+        elif emotion == "disgusted":
+            line((0.5 * side, -0.16), (0.22 * side, -0.12))
+            if side < 0:
+                line((-0.56, -0.42), (-0.18, -0.34))
+        elif emotion == "pain":                  # eyes squeezed shut, brows pulled down
+            line((0.5 * side, -0.24), (0.24 * side, -0.14))
+            line((0.24 * side, -0.14), (0.5 * side, -0.04))
+            line((0.56 * side, -0.46), (0.16 * side, -0.32))
+        else:
+            dot((ex, -0.12), 0.085)
+            if emotion == "sad":
+                line((0.54 * side, -0.36), (0.2 * side, -0.48))
+            elif emotion == "angry":
+                line((0.56 * side, -0.46), (0.16 * side, -0.3))
+    if emotion == "happy":
+        arc((0, 0.14), 0.44, 0.36, 20, 160)
+    elif emotion == "sad":
+        arc((0, 0.64), 0.32, 0.22, 200, 340)
+    elif emotion == "surprised":
+        cv2.ellipse(big, P(0, 0.42), (int(0.14 * R), int(0.19 * R)), 0, 0, 360, color, t, cv2.LINE_AA)
+    elif emotion == "afraid":
+        cv2.ellipse(big, P(0, 0.45), (int(0.27 * R), int(0.12 * R)), 0, 0, 360, color, t, cv2.LINE_AA)
+    elif emotion == "angry":
+        arc((0, 0.62), 0.26, 0.14, 200, 340)
+    elif emotion == "disgusted":
+        pts = np.array([P(-0.32, 0.46), P(-0.12, 0.36), P(0.06, 0.48), P(0.3, 0.38)], np.int32)
+        cv2.polylines(big, [pts], False, color, t, cv2.LINE_AA)
+    elif emotion == "pain":                      # grimace with clenched teeth
+        cv2.rectangle(big, P(-0.34, 0.30), P(0.34, 0.54), color, t, cv2.LINE_AA)
+        line((-0.34, 0.42), (0.34, 0.42))
+    else:
+        line((-0.28, 0.4), (0.28, 0.4))
+    img[y0:y1, x0:x1] = cv2.resize(big, (x1 - x0, y1 - y0), interpolation=cv2.INTER_AREA)
+    return img
+
+
+STRIP_BACK = (52, 47, 44)
+
+
+def timeline_strip(img, x, y, w, h, timeline, now, colors, emotions, seconds=30.0):
+    """Coloured strip: the strongest emotion over the last `seconds` (oldest on the left)."""
+    import cv2
+
+    cv2.rectangle(img, (x, y), (x + w - 1, y + h - 1), STRIP_BACK, -1)
+    if not timeline:
+        return img
+    times = np.array([t for t, _, _ in timeline])
+    kinds = np.array([k for _, k, _ in timeline])
+    confs = np.clip(np.array([c for _, _, c in timeline]), 0.0, 1.0)
+    cols = now - seconds + (np.arange(w) + 0.5) * seconds / w
+    pos = np.searchsorted(times, cols, side="right") - 1
+    ok = (pos >= 0) & (cols - times[np.maximum(pos, 0)] <= 1.0)
+    if ok.any():
+        palette = np.array([colors[e] for e in emotions], np.float32)
+        j = pos[ok]
+        mix = (0.35 + 0.65 * confs[j])[:, None]
+        rgb = palette[kinds[j]] * mix + np.array(STRIP_BACK, np.float32) * (1 - mix)
+        img[y:y + h, x:x + w][:, ok] = np.round(rgb).astype(np.uint8)[None]
+    return img
+
+
+PAIN_STEPS = (0.12, 0.2, 0.35, 0.5, 0.65)
+PAIN_COLORS = (GREEN, (70, 210, 190), AMBER, (40, 130, 245), RED)
+
+
+def pain_meter(img, x, y, score, seg_w=16, seg_h=8, gap=4):
+    """Five segments, green to red; how many light up follows the pain score."""
+    for i, (step, color) in enumerate(zip(PAIN_STEPS, PAIN_COLORS)):
+        x0 = x + i * (seg_w + gap)
+        rounded_rect(img, x0, y, x0 + seg_w, y + seg_h, 3, color if score >= step else (62, 56, 52))
+    return img
 
 
 class PanelCache:

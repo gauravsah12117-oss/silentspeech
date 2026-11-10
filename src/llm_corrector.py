@@ -3,7 +3,8 @@
 Safety rule: the LLM may only choose among the model's candidate phrases.
 Its answer is checked against the candidate IDs; anything else is ignored
 and the model's top-1 guess is used instead. The LLM never receives images,
-video or landmarks, only phrase text and probabilities.
+video or landmarks, only phrase text and probabilities, plus (when emotion
+reading is on) a few words about the facial expression, e.g. "looked afraid".
 
 Providers are called over plain HTTPS with the standard library, so no
 vendor SDK is needed: claude, gemini, openai, groq, or a local model via ollama.
@@ -25,7 +26,7 @@ phrases. A lip-reading model produced these candidate phrases:
 
 Recent things the patient said, oldest first:
 {history}
-
+{face}
 Choose the single most likely candidate given the context. You must choose
 one of the candidates above and must not invent new phrases.
 Reply with JSON only: {{"choice": "<phrase_id>", "reason": "<one short sentence>"}}"""
@@ -42,12 +43,15 @@ _KEY_ENV = {
 }
 
 
-def build_prompt(candidates, history, phrases):
+def build_prompt(candidates, history, phrases, expression=None):
+    """expression: optional words about the face while mouthing (src.emotion.describe)."""
     cand_lines = "\n".join(
         f'{i}. [{pid}] "{phrases[pid]["text"]}" (probability {p:.2f})'
         for i, (pid, p) in enumerate(candidates, 1))
     hist_lines = "\n".join(f'- "{phrases[pid]["text"]}"' for pid in history if pid in phrases)
-    return PROMPT.format(candidates=cand_lines, history=hist_lines or "- (nothing yet)")
+    face = (f"\nWhile mouthing it, the patient's facial expression {expression}. "
+            "Use this only as a hint.\n") if expression else ""
+    return PROMPT.format(candidates=cand_lines, history=hist_lines or "- (nothing yet)", face=face)
 
 
 def parse_choice(text, candidates, phrases):
@@ -98,16 +102,17 @@ class LLMCorrector:
 
     # -- public API ---------------------------------------------------------
 
-    def submit(self, candidates, history, phrases):
+    def submit(self, candidates, history, phrases, expression=None):
         """Start a re-ranking call in the background; returns a Future.
 
         The future resolves to (phrase_id, reason) or None on any failure.
+        expression: optional words about the face while mouthing, e.g. "looked afraid".
         """
-        return self._pool.submit(self._choose, list(candidates), list(history), phrases)
+        return self._pool.submit(self._choose, list(candidates), list(history), phrases, expression)
 
-    def choose(self, candidates, history, phrases):
+    def choose(self, candidates, history, phrases, expression=None):
         """Blocking version with the timeout applied. Falls back to top-1."""
-        future = self.submit(candidates, history, phrases)
+        future = self.submit(candidates, history, phrases, expression)
         try:
             result = future.result(timeout=self.timeout_s)
         except FutureTimeout:
@@ -118,8 +123,8 @@ class LLMCorrector:
 
     # -- internals ----------------------------------------------------------
 
-    def _choose(self, candidates, history, phrases):
-        prompt = build_prompt(candidates, history[-config.LLM_CONTEXT_PHRASES:], phrases)
+    def _choose(self, candidates, history, phrases, expression=None):
+        prompt = build_prompt(candidates, history[-config.LLM_CONTEXT_PHRASES:], phrases, expression)
         try:
             reply = self._call(prompt)
         except Exception as e:  # network errors, bad keys, retired models...

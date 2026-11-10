@@ -104,6 +104,7 @@ Everything runs on a normal laptop CPU. No special sensors, no GPU, no cost.
 |---|---|
 | **Real-time silent lip reading** | Recognises 30–50 essential phrases from silent mouthing through a webcam. |
 | **Facial muscle analysis** | 478-point face mesh plus 52 learned muscle-movement scores per frame, shown live as a face-mesh view. |
+| **Emotion and pain reading** | Reads the facial expression (neutral, happy, sad, surprised, afraid, angry, disgusted) and a pain score from those muscle scores, using the psychologists' Facial Action Coding System. A pain expression held for 3 seconds alerts the caregiver. |
 | **Own-voice output** | Speaks in the user's real recorded voice, or a clone of it, instead of a robotic voice. |
 | **Context-aware correction** | An LLM re-ranks the model's top guesses using the recent conversation. |
 | **Sentence builder** | Combines phrases ("I need water" + "Call my mother") into one message. |
@@ -291,6 +292,35 @@ Mixing the templates' probabilities into the deep model's (20–50%) did not hel
 
 Caveats: 57 clips is a small test (one clip is almost 2 percentage points), and all of them came from two sittings, so a new day or new light will score lower. More clips per phrase help the deep model more than the templates.
 
+### 6.9 Emotion and pain from the facial muscles
+
+Someone who can't speak also can't say how they feel. SilentSpeech reads it from the same 52 muscle scores the Face Landmarker already gives (`src/emotion.py`); no extra model, no video stored.
+
+**The science.** Psychologists describe facial expressions with the *Facial Action Coding System* (FACS, Ekman & Friesen): each *action unit* (AU) is one visible muscle movement. The Face Landmarker's blendshapes measure nearly the same movements, so each AU is read from them, and emotions from the AU combinations that EMFACS lists for the basic emotions:
+
+| Emotion | Muscles that must move together | Supporting muscles |
+|---|---|---|
+| Happy | lip corners up (AU12) | cheeks raised (AU6) |
+| Sad | inner brows up (AU1) + lip corners down (AU15) | brows down (AU4), chin raised (AU17) |
+| Surprised | inner + outer brows up (AU1, AU2) | eyes wide (AU5), jaw dropped (AU26) |
+| Afraid | brows up *and* drawn together, eyes wide (AU1, AU4, AU5) | outer brows up, lips stretched, jaw dropped |
+| Angry | brows down + eyes narrowed (AU4, AU7) | lips tightened (AU23), eyes wide |
+| Disgusted | nose wrinkled (AU9) | upper lip raised (AU10), lip corners down, chin raised |
+
+"Must move together" is a soft AND (a geometric mean): one missing muscle costs a lot but doesn't zero the score. An emotion has to beat a "neutral" level before it is shown.
+
+**Pain** uses the core of the *Prkachin & Solomon Pain Intensity* score (PSPI), the standard FACS pain measure: brows lowered (AU4) + eyes tightened (AU6/AU7) + nose wrinkled or upper lip raised (AU9/AU10), with closed eyes (AU43) adding to it. All three have to move together, so frowning in concentration is not taken for pain. A **strong pain expression held for 3 seconds** (not while mouthing a phrase) raises an orange caregiver banner with the alert sound, repeating until someone presses **A**. A pain grimace looks like anger or disgust to the emotion rules, so while the pain expression is strong the card says **"In pain"** instead.
+
+**Three things make it work on a real face:**
+
+- **Personal baseline.** Resting faces differ: some brows sit low, some eyes look narrow. Each muscle is measured against this person's own resting level, learned all the time from the last minute (a low percentile, capped so a long smile is never "learned away"). The card says "learning your resting face" for the first few seconds.
+- **Speech-aware.** Mouthing a phrase moves the jaw and lips a lot, and people raise their brows for emphasis. While a phrase is being mouthed, mouth muscles count 30%, a smile has to show in the cheeks, surprise also needs wide eyes, and any emotion needs stronger evidence. On the user's own real clip of mouthing "I can't breathe", the reading went from "Surprised" (brows raised for emphasis) to **Neutral 91%** with this rule.
+- **Smoothing** over about half a second, so a blink or one noisy frame doesn't flip it.
+
+**Where it shows up:** an *Emotion* card with a drawn face, the emotion and its confidence, the muscles behind it ("smile · cheeks raised"), a 30-second emotion timeline and a 5-step pain meter; a tag next to the face in the video; the expression next to each phrase in the history and the transcript (`Call my mother [lips 99%] (looked happy)`); and, when the LLM is asked to choose between phrases, a few words such as "looked afraid (pain expression: moderate)" as a hint. **E** switches all of it off.
+
+**Checked on:** unit tests for each textbook expression, mouthing vs. emotion, the personal baseline, smoothing and pain vs. concentration, smiling and closed eyes (`tests/test_emotion.py`); a real smiling face (**Happy 100%**, pain "none"); and the user's real mouthing clip (**Neutral**). It reads facial *expressions*, not feelings: a face can smile without being happy, expressions differ across people and cultures, and people with facial paralysis or Parkinson's may show little expression. Treat it as a hint for the caregiver, never as a diagnosis.
+
 ---
 
 ## 7. Tech stack
@@ -345,6 +375,7 @@ silentspeech/
 │   ├── model.py
 │   ├── templates.py
 │   ├── deep.py               # deep model: neural-network ensemble trained on one person's clips
+│   ├── emotion.py            # facial emotion and pain expression from the 52 muscle scores (FACS)
 │   ├── recognizer.py
 │   ├── ui.py                 # fonts, cards, mouth close-up, muscle bars for the live app
 │   ├── decision.py
@@ -360,6 +391,7 @@ silentspeech/
 │   ├── test_core.py
 │   ├── test_templates.py
 │   ├── test_deep.py                # deep model: learns, calibrates, saves, stays safe
+│   ├── test_emotion.py             # emotions, speech-awareness, personal baseline, pain
 │   ├── test_ui.py                  # live screen, custom phrases, transcript
 │   └── test_llm_http.py            # LLM layer against a local mock server
 ├── data/
@@ -488,6 +520,9 @@ All settings live in `config.py`, so nobody has to edit code to change behaviour
 | `VOICE_MODE` | `"cloned"` | `cloned` (pre-rendered clips) or `default` (pyttsx3) |
 | `SPEAKER_ID` | `"s01"` | Whose cloned voice and enrolled model to use |
 | `SAVE_VIDEO` | `False` | Save raw video too (only for poster images, with consent) |
+| `EMOTION` | `True` | Read the facial expression and a pain score (**E** toggles it in the app) |
+| `EMOTION_TO_LLM` | `True` | Give the LLM a few words about the face while a phrase was mouthed |
+| `PAIN_ALERT`, `PAIN_ALERT_LEVEL`, `PAIN_ALERT_SECONDS` | `True`, `0.5`, `3.0` | A strong pain expression held this long alerts the caregiver |
 | `AUTO_*` | see file | Auto-mode start/stop thresholds; the app shows live MAR and motion values to tune them |
 | `AUGMENT` | see file | Augmentation ranges; set one to 0 to switch it off |
 
@@ -794,9 +829,10 @@ The app picks the recogniser automatically: the neural model if it was trained o
 - **Left:** a face-mesh view of the webcam: dimmed video on a grid, the 478-point wireframe, glowing nodes and highlighted lips (**V** switches to the plain camera)
 - **Below the video:** the **tap-to-speak board**, your phrases as tiles (emergency ones tinted red). Click one to say it. When the app is unsure, its three options are marked 1/2/3.
 - **Prediction card:** the recognised phrase with confidence bars for the top 3 (click a row to pick it), and a second opinion: "neural net + templates agree", or what the templates guessed instead
-- **Mouth and muscle activity:** a live zoomed view of the lips with their contours, and bars for the facial muscle scores (jaw open, lips closed, pucker, funnel, press, smile...)
+- **Mouth, emotion and muscles:** a live zoomed view of the lips with their contours; the *Emotion* card (a drawn face, the emotion and the muscles behind it, a 30-second emotion timeline, a pain meter); and bars for the muscle scores of the mouth, brows, eyes and nose
+- **Emotion tag on the video:** the current emotion above the face, and the pain expression below it when there is one
 - **Sentence and history:** the message being built, and the last phrases with time and how each was chosen (lips, lips + context, picked, corrected, tapped)
-- **Alert banner:** turns red with a sound when an emergency phrase is detected, repeats until acknowledged (A, or click the banner)
+- **Alert banner:** turns red with a sound when an emergency phrase is detected, and orange when a strong pain expression is held for 3 seconds; it repeats until acknowledged (A, or click the banner)
 - **Warnings on the video:** "No face detected" and "Too dark" with what to do
 - **Status bar:** mode, FPS, latency, tracker, and all the keys
 
@@ -816,6 +852,7 @@ The panels are drawn with real fonts (Segoe UI; Nirmala UI for Hindi and Nepali)
 | A | Acknowledge an emergency alert |
 | F | Focus: use only your most reliable phrases (higher accuracy); F again for all phrases |
 | V | View: face-mesh view or plain camera |
+| E | Emotion reading on or off (expression, pain meter, pain alert) |
 | Q | Quit |
 
 If no model has been trained yet, the app still opens in tracking-only mode, which is handy for checking the camera and lighting.
@@ -856,7 +893,7 @@ Reply with JSON only: {"choice": "<phrase_id>", "reason": "<one short sentence>"
 
 ### Privacy
 
-The LLM receives only phrase text and probabilities, never images, video or landmarks. For a fully private setup, run a small local model with Ollama and set `LLM_PROVIDER="ollama"`. Test your provider with `python check_setup.py --llm-ping`.
+The LLM receives only phrase text and probabilities, never images, video or landmarks. With emotion reading on it also gets a few words about the facial expression, such as "looked afraid"; set `EMOTION_TO_LLM = False` to stop that. For a fully private setup, run a small local model with Ollama and set `LLM_PROVIDER="ollama"`. Test your provider with `python check_setup.py --llm-ping`.
 
 **Groq (fast, free tier):** put `LLM_PROVIDER=groq` and `GROQ_API_KEY=...` in `.env`. On 2026-11-10, `qwen/qwen3.8-27b` (reasoning off) answered in about 0.25–0.45 s. Providers retire model names often; on Groq the app switches automatically to an available chat model if the configured one disappears.
 
@@ -937,6 +974,7 @@ The script holds back one clip per phrase and prints accuracy on those clips bef
 | **Privacy** | Only lip coordinates are stored by default, never video. All processing runs on the laptop. The LLM never receives images or landmarks, and the whole system can run offline. The conversation transcript stays on the laptop and can be turned off (`SAVE_TRANSCRIPT`); custom phrases (which may contain names) are never uploaded. |
 | **Voice-clone misuse** | Voices are cloned only with the owner's consent. In the app, the cloned voice can only say the fixed phrase list, not arbitrary text. The interface clearly labels the output as an AI-generated voice. Optionally, add an inaudible audio watermark (for example with Meta's AudioSeal) so the audio can be identified as synthetic. |
 | **Safety** | Low-confidence predictions are never spoken; the user picks from options instead. Emergency phrases use a lower alert threshold, because missing an emergency is worse than a false alarm. |
+| **Emotion reading** | It reads facial expressions, not feelings, and says so. Expressions differ across people and cultures, and illness can weaken them, so the reading is shown as a hint for the caregiver, never a diagnosis. It is measured against each person's own resting face, nothing about it is stored except one word in the transcript, and **E** (or `EMOTION = False`) turns it off completely. |
 | **Fairness** | We test across team members and volunteers of different genders, with and without facial hair and glasses, and with different skin tones, and we report accuracy for each person separately. |
 | **Honesty** | We report real measured numbers, including where the system performs poorly. |
 | **Medical disclaimer** | SilentSpeech is a research prototype, not a medical device. Real clinical use would need testing with patients, ethics approval, and regulatory clearance. |

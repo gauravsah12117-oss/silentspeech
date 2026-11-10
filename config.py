@@ -89,6 +89,14 @@ SAVE_TRANSCRIPT = True        # keep a text record of what was said (logs/conver
 # --- Safety ----------------------------------------------------------------
 ALERT_REPEAT_SECONDS = 20     # repeat the emergency tone until someone presses A
 
+# --- Emotion from the face's muscle scores (src/emotion.py; E toggles in the app)
+EMOTION = True                # read the facial expression and a pain score (needs the Face Landmarker)
+EMOTION_TO_LLM = True         # tell the LLM how the face looked while a phrase was mouthed (a few words)
+PAIN_ALERT = True             # a strong pain expression held for a few seconds alerts the caregiver
+PAIN_ALERT_LEVEL = 0.5        # pain score that counts as "strong" (0..1; see src/emotion.py)
+PAIN_ALERT_SECONDS = 3.0      # ...held this long (not while mouthing a phrase)
+PAIN_ALERT_QUIET_SECONDS = 60 # after A dismisses it, no new pain alert for this long
+
 # --- Automatic clip quality checks (collect_data.py, enroll.py) -------------
 MAX_FACE_LOST_FRAC = 0.10     # reject if the face is lost in more than 10% of frames
 MIN_FPS = 20                  # reject if the camera delivered fewer frames per second
