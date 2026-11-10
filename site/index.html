@@ -1,0 +1,231 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SilentSpeech · Speak without a voice</title>
+<meta name="description" content="SilentSpeech reads silent lip movements through an ordinary laptop webcam and speaks the phrase out loud in the user's own voice. Assistive AI by Team OriginX.">
+<meta property="og:type" content="website">
+<meta property="og:title" content="SilentSpeech · Speak without a voice">
+<meta property="og:description" content="Silent lip reading through an ordinary webcam, spoken aloud in the user's own voice. With emotion and pain reading, emergency alerts and a live browser demo.">
+<meta property="og:url" content="https://silentspeech-originx.vercel.app/">
+<meta property="og:image" content="https://silentspeech-originx.vercel.app/img/og.jpg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="theme-color" content="#0d1014">
+<link rel="icon" href="/img/logo.svg" type="image/svg+xml">
+<link rel="icon" href="/favicon.ico" sizes="any">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="nav">
+  <div class="wrap nav-in">
+    <a class="brand" href="#top"><img src="/img/logo.svg" alt="" width="32" height="32"> SilentSpeech</a>
+    <nav>
+      <a href="#how">How it works</a>
+      <a href="#features">Features</a>
+      <a href="#results">Results</a>
+      <a href="#demo">Live demo</a>
+      <a class="btn small" href="https://github.com/gauravsah12117-oss/silentspeech" target="_blank" rel="noopener">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<main id="top">
+  <section class="hero">
+    <div class="wrap">
+      <p class="eyebrow">Assistive AI · Team OriginX</p>
+      <h1>Speak without a voice.</h1>
+      <p class="lead">SilentSpeech reads <strong>silent lip movements</strong> through an ordinary laptop webcam and speaks the phrase out loud &mdash; <strong>in the user's own voice</strong>.</p>
+      <div class="cta">
+        <a class="btn primary" href="#demo">Try the live face demo</a>
+        <a class="btn" href="https://github.com/gauravsah12117-oss/silentspeech" target="_blank" rel="noopener">See the code on GitHub</a>
+      </div>
+      <ul class="facts">
+        <li><b>₹0</b><span>extra hardware: any laptop webcam</span></li>
+        <li><b>77%</b><span>on clips the model never saw (10 phrases)</span></li>
+        <li><b>Offline</b><span>runs on a low-power laptop CPU</span></li>
+        <li><b>Own voice</b><span>not a robotic voice</span></li>
+      </ul>
+      <figure class="shot hero-shot">
+        <img src="/img/spoken.webp" width="1280" height="720" alt="The SilentSpeech app: a glowing face mesh on the left; on the right the phrase 'Thank you' spoken with 91% confidence, the emotion card reading Happy, muscle bars, the sentence and the history.">
+      </figure>
+    </div>
+  </section>
+
+  <section class="band" id="problem">
+    <div class="wrap">
+      <h2>Who it is for</h2>
+      <p class="sub">Many people lose their voice suddenly, but can still move their lips.</p>
+      <div class="grid three">
+        <article class="card"><span class="ico">🎗️</span><h3>After a laryngectomy</h3><p>Removal of the voice box, most often for throat cancer &mdash; among the most common cancers in India.</p></article>
+        <article class="card"><span class="ico">🏥</span><h3>ICU patients</h3><p>On a ventilator or with a tracheostomy tube: fully awake, but unable to make a sound.</p></article>
+        <article class="card"><span class="ico">🧠</span><h3>Stroke &amp; paralysis</h3><p>Stroke survivors and people with vocal-cord paralysis or neurological conditions.</p></article>
+      </div>
+      <p class="note">Today they point at alphabet boards, write on paper or gesture: slow, tiring, and impossible when the hands are weak. Families and nurses are left guessing &mdash; and pain signals get missed.</p>
+    </div>
+  </section>
+
+  <section id="how">
+    <div class="wrap">
+      <h2>How it works</h2>
+      <p class="sub">Everything runs on the laptop, in real time. No special sensors, no GPU.</p>
+      <ol class="steps">
+        <li><span class="n">1</span><h3>See</h3><p>The webcam feeds Google's MediaPipe Face Landmarker: <b>478 face points</b> and <b>52 facial-muscle scores</b>, every frame.</p></li>
+        <li><span class="n">2</span><h3>Read the lips</h3><p>40 lip points become a motion signature. A <b>deep model</b> &mdash; five small neural networks trained on the user's own clips &mdash; recognises the phrase. Instant templates double-check it.</p></li>
+        <li><span class="n">3</span><h3>Decide safely</h3><p>Sure? It speaks. Unsure? It shows its top 3, or asks an LLM to pick using the conversation &mdash; the LLM can never invent a phrase. Emergencies alert the caregiver.</p></li>
+        <li><span class="n">4</span><h3>Speak</h3><p>In the user's <b>own recorded or cloned voice</b>, levelled to a clear loudness, with sound cues so nobody has to watch the screen.</p></li>
+        <li><span class="n">5</span><h3>Learn</h3><p>Every correction becomes a new example, and the deep model retrains itself when the app closes.</p></li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="band" id="features">
+    <div class="wrap">
+      <h2>Features</h2>
+      <div class="grid features">
+        <article class="card"><span class="ico">🧠</span><h3>Deep learning on your own lips</h3><p>An ensemble of 5 neural networks with heavy augmentation, checked by honest cross-validation &mdash; and only used if it beats the simpler method.</p></article>
+        <article class="card"><span class="ico">🗣️</span><h3>Your own voice</h3><p>Voice banking: each phrase recorded once in the user's voice, or cloned. AI-generated audio is always labelled as such.</p></article>
+        <article class="card"><span class="ico">😊</span><h3>Emotion &amp; pain reading</h3><p>Seven expressions and a pain score from the facial muscles, using the psychologists' Facial Action Coding System.</p></article>
+        <article class="card"><span class="ico">🚨</span><h3>Emergency &amp; pain alarms</h3><p>"I can't breathe" or a held pain expression sound an alarm for the caregiver that repeats until acknowledged.</p></article>
+        <article class="card"><span class="ico">💧</span><h3>Picture symbols</h3><p>Every phrase has a symbol, like the communication boards used in hospitals &mdash; tap any tile to speak it.</p></article>
+        <article class="card"><span class="ico">🛟</span><h3>Safe when unsure</h3><p>A low-confidence guess is never spoken. Repeated tries add up, and 1/2/3 picks from the top three.</p></article>
+        <article class="card"><span class="ico">💬</span><h3>Context-aware</h3><p>An LLM (Groq, Claude, Gemini or a local model) chooses between close guesses using the conversation and the facial expression.</p></article>
+        <article class="card"><span class="ico">🔔</span><h3>Sound you can follow</h3><p>Soft chimes for listening, done, unsure and learned; distinct alarms; volume keys; every clip levelled to one loudness.</p></article>
+        <article class="card"><span class="ico">🌐</span><h3>Any language</h3><p>Add your own phrases in any language or script, such as Hindi or Nepali, and teach them in a minute.</p></article>
+        <article class="card"><span class="ico">🔒</span><h3>Private by design</h3><p>Stores only lip coordinates, never video. Works fully offline; the emotion reading can be switched off.</p></article>
+      </div>
+    </div>
+  </section>
+
+  <section id="screens">
+    <div class="wrap">
+      <h2>Inside the app</h2>
+      <p class="sub">The live screen, as it looks on a laptop. (The face here is drawn as a mesh only.)</p>
+      <div class="tabs" role="tablist">
+        <button role="tab" aria-selected="true" data-img="/img/ready.webp" data-cap="Ready: a three-step guide shows a first-time user how to start.">Ready</button>
+        <button role="tab" aria-selected="false" data-img="/img/listening.webp" data-cap="Listening: a recording ring, a live lip-movement trace and a scan line over the face.">Listening</button>
+        <button role="tab" aria-selected="false" data-img="/img/spoken.webp" data-cap="Spoken: the phrase is said in the user's own voice; the sentence and history build up, with the facial expression.">Spoken</button>
+        <button role="tab" aria-selected="false" data-img="/img/unsure.webp" data-cap="Unsure: nothing is spoken; the top three are offered as 1, 2, 3 on the screen and the picture board.">Unsure</button>
+        <button role="tab" aria-selected="false" data-img="/img/pain.webp" data-cap="Pain: a strong pain expression held for 3 seconds raises an alarm for the caregiver.">Pain alert</button>
+      </div>
+      <figure class="shot">
+        <img id="screen-img" src="/img/ready.webp" width="1280" height="720" alt="SilentSpeech app screen">
+        <figcaption id="screen-cap">Ready: a three-step guide shows a first-time user how to start.</figcaption>
+      </figure>
+    </div>
+  </section>
+
+  <section class="band" id="results">
+    <div class="wrap">
+      <h2>Results, measured honestly</h2>
+      <p class="sub">5-fold cross-validation on real clips: every clip is judged by networks that never saw it, and both methods are scored on exactly the same clips.</p>
+      <div class="grid three stats">
+        <div class="stat"><span class="from">66%</span><span class="arrow">→</span><span class="to">76%</span><p>accuracy on unseen clips<br><small>instant templates → deep model</small></p></div>
+        <div class="stat"><span class="from">9%</span><span class="arrow">→</span><span class="to">43%</span><p>spoken straight away,<br><small>96% of those correct</small></p></div>
+        <div class="stat"><span class="from">47%</span><span class="arrow">→</span><span class="to">10%</span><p>"please repeat"<br><small>far fewer interruptions</small></p></div>
+      </div>
+      <p class="note">One speaker, 58 clips of 10 phrases, recorded in two sittings, on a 2-core laptop. The built-in self-check, which trains fewer networks to save time, reported <b>77% vs 67%</b>. A new day or new lighting will score lower, and more clips per phrase raise accuracy &mdash; we report what we measured, including the limits.</p>
+    </div>
+  </section>
+
+  <section id="emotion">
+    <div class="wrap two">
+      <div>
+        <h2>Reading the face, not just the lips</h2>
+        <p>A patient who can't speak also can't say how they feel. SilentSpeech reads the expression from the same 52 muscle scores, using the <b>Facial Action Coding System</b> that psychologists use, and a pain score based on the clinical <b>PSPI</b> pain measure.</p>
+        <p>It learns each person's resting face, knows that mouthing words moves the lips and brows, and treats the result as a hint for the caregiver &mdash; never a diagnosis.</p>
+      </div>
+      <table class="facs">
+        <tr><th>Expression</th><th>Muscles moving together</th></tr>
+        <tr><td>😊 Happy</td><td>lip corners up + cheeks raised</td></tr>
+        <tr><td>😢 Sad</td><td>inner brows up + lip corners down</td></tr>
+        <tr><td>😮 Surprised</td><td>brows up, eyes wide, jaw dropped</td></tr>
+        <tr><td>😨 Afraid</td><td>brows up and together, eyes wide</td></tr>
+        <tr><td>😠 Angry</td><td>brows down + eyes narrowed</td></tr>
+        <tr><td>🤢 Disgusted</td><td>nose wrinkled, upper lip raised</td></tr>
+        <tr><td>😣 Pain</td><td>brows down + eyes tightened + nose wrinkled</td></tr>
+      </table>
+    </div>
+  </section>
+
+  <section class="band" id="demo">
+    <div class="wrap">
+      <h2>Live demo: try it on your own face</h2>
+      <p class="sub">The same face model and emotion rules as the app, running <b>entirely in your browser</b>. No video or image leaves your device. (Lip reading itself needs a few minutes of personal calibration, so it runs in the desktop app.)</p>
+      <div class="demo" id="demo-panel">
+        <div class="stage">
+          <canvas id="demo-canvas" width="640" height="480" aria-label="Your face, drawn as a mesh"></canvas>
+          <video id="demo-video" playsinline muted></video>
+          <div class="stage-over">
+            <span class="live-dot">LIVE</span><span id="demo-fps"></span>
+            <label class="toggle"><input type="checkbox" id="demo-view" checked> show camera</label>
+          </div>
+          <div class="stage-start">
+            <button class="btn primary big" id="demo-start">Start camera demo</button>
+            <button class="btn" id="demo-stop" hidden>Stop camera</button>
+          </div>
+        </div>
+        <aside class="readout">
+          <div class="emo">
+            <span class="emo-face" id="emo-face">😐</span>
+            <div><b id="emo-label">Neutral</b> <span id="emo-conf"></span><small id="emo-why">start the camera to begin</small></div>
+          </div>
+          <p class="mini">Last 30 seconds</p>
+          <canvas id="emo-timeline" width="300" height="8"></canvas>
+          <div class="pain"><span class="mini">Pain</span><span id="pain-meter"><span></span><span></span><span></span><span></span><span></span></span><span id="pain-level" data-level="none">none</span></div>
+          <p class="mini">Muscles</p>
+          <div id="demo-muscles"></div>
+          <p class="mini">Mouth opening, last 3 seconds</p>
+          <canvas id="lip-signal" width="300" height="46"></canvas>
+        </aside>
+      </div>
+      <p class="demo-status" id="demo-status" role="status">Press "Start camera demo". Your browser will ask for the camera.</p>
+    </div>
+  </section>
+
+  <section id="responsible">
+    <div class="wrap">
+      <h2>Responsible by design</h2>
+      <div class="grid three">
+        <article class="card"><h3>Privacy</h3><p>Only lip coordinates are stored, never video. Everything runs on the laptop; the LLM sees phrase text and a few words about the expression, never images.</p></article>
+        <article class="card"><h3>Safety</h3><p>Unsure guesses are never spoken. Emergency phrases use a lower alert threshold, because missing an emergency is worse than a false alarm.</p></article>
+        <article class="card"><h3>Honesty</h3><p>Real measured numbers, limits included. A cloned voice is labelled as AI-generated. A research prototype, not a medical device.</p></article>
+      </div>
+      <p class="note"><b>Current limits:</b> a fixed set of phrases rather than free sentences; each person calibrates their own clips; tongue and throat sounds are invisible to a camera; very dim light, masks or tubes over the mouth block the lips.</p>
+    </div>
+  </section>
+
+  <section class="band" id="run">
+    <div class="wrap two">
+      <div>
+        <h2>Run it yourself</h2>
+        <ol class="plain">
+          <li>Download the code from <a href="https://github.com/gauravsah12117-oss/silentspeech" target="_blank" rel="noopener">GitHub</a> (Code → Download ZIP).</li>
+          <li>Double-click <code>start.bat</code> (macOS / Linux: <code>sh start.sh</code>). It installs everything, checks the camera, and calibrates: mouth 10 phrases, 4 times each (about 10 minutes).</li>
+          <li>Afterwards, open it with <code>app.bat</code> or the SilentSpeech icon on the desktop.</li>
+        </ol>
+        <p class="mini-note">Needs a laptop with a webcam and Python 3.10, 3.11 or 3.12. Works offline; an LLM key is optional.</p>
+      </div>
+      <div class="card keys">
+        <h3>In the app</h3>
+        <p><kbd>SPACE</kbd> mouth a phrase · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> pick or correct · <kbd>ENTER</kbd> say the sentence · <kbd>F</kbd> focus on your best phrases · <kbd>E</kbd> emotion on/off · <kbd>−</kbd><kbd>+</kbd> volume · <kbd>A</kbd> acknowledge an alarm</p>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="wrap foot">
+    <span><img src="/img/logo.svg" alt="" width="20" height="20"> SilentSpeech · Team OriginX</span>
+    <span>MIT License · A research prototype, not a medical device · <a href="https://github.com/gauravsah12117-oss/silentspeech" target="_blank" rel="noopener">GitHub</a></span>
+  </div>
+</footer>
+<script src="/main.js" defer></script>
+<script type="module" src="/demo.js"></script>
+</body>
+</html>

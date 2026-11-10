@@ -4,6 +4,8 @@
 
 SilentSpeech is a real-time, software-only assistive system. It reads silent lip movements through an ordinary laptop webcam, recognises the phrase being mouthed, and speaks it aloud in the user's own cloned voice.
 
+**Website and live demo: https://silentspeech-originx.vercel.app** (the face and emotion reading runs right in the browser; the full lip-reading app runs on a laptop, see Quick start).
+
 | | |
 |---|---|
 | **Competition** | `[Competition name]` |
@@ -35,6 +37,7 @@ Two recognisers learn from your calibration clips. The *instant templates* work 
 | `train_more.bat` | Record 4 more examples of every phrase (about 4 minutes), retrain, then show accuracy before and after. **The most effective way to make it more accurate.** |
 | `train_deep.bat` | Retrain the deep model on all your clips (about 3–4 minutes) and show an honest accuracy check against the templates |
 | `add_phrase.bat` | Add **your own phrase**, any words in any language ("Turn on the news", "राम लाई बोलाउनुहोस्"), and teach it in about a minute |
+| **SilentSpeech** icon on the desktop | Opens the live app, like `app.bat`. `start.bat` offers to create it; `python tools/make_shortcut.py` makes it any time |
 
 **Getting more accuracy:** more examples per phrase help the most. On the first real calibration, accuracy rose from 47% with 1 example per phrase to 60% with 2 and 67% with 3. The app also learns while you use it: whenever you pick, correct or confirm a phrase with 1/2/3, that clip becomes a new example, and the deep model is retrained with those examples when you close the app. Finally, **F** in the live app switches to your most reliable phrases. With fewer, more distinct phrases accuracy is much higher: on that first calibration, 6 phrases scored about 96% against 75% for all 10.
 
@@ -389,7 +392,12 @@ silentspeech/
 ├── notebooks/
 │   └── voice_cloning_colab.ipynb   # renders cloned-voice audio on free GPU
 ├── tools/
-│   └── make_synthetic_data.py      # fake clips to smoke-test the pipeline without a webcam
+│   ├── make_synthetic_data.py      # fake clips to smoke-test the pipeline without a webcam
+│   └── make_shortcut.py            # SilentSpeech icon on the Windows desktop
+├── site/                           # the project website (Vercel): pages, screenshots, live browser demo
+│   ├── index.html, style.css
+│   ├── demo.js                     # live demo: MediaPipe Face Landmarker in the browser
+│   └── emotion.js                  # src/emotion.py ported to JavaScript (same readings)
 ├── tests/                          # python -m unittest discover -s tests
 │   ├── test_core.py
 │   ├── test_templates.py

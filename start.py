@@ -319,8 +319,24 @@ def main(argv=None):
     if not llm.available:
         print("(Optional) For context-aware correction, put an API key in .env - see README section 17.")
     llm.close()
+    offer_shortcut()
     wait_enter("Press Enter to start...")
     launch_app(speaker, args.camera)
+
+
+def offer_shortcut():
+    """Windows: offer a SilentSpeech icon on the desktop, to open the app later with a double-click."""
+    if sys.platform != "win32":
+        return
+    try:
+        from tools.make_shortcut import desktop_dir, make_icon, make_shortcut
+        if (desktop_dir() / "SilentSpeech.lnk").exists():
+            return
+        if yes("Put a SilentSpeech icon on your desktop, so you can open it with a double-click?", True):
+            make_icon()
+            print(f"Done: {make_shortcut()}")
+    except Exception as e:  # never let a shortcut stop the setup
+        print(f"(Could not make the desktop icon: {e})")
 
 
 def launch_app(speaker, camera):

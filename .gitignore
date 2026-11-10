@@ -23,3 +23,8 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# Vercel CLI link (per laptop)
+.vercel
+.env*
+!.env.example
